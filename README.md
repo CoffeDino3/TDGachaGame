@@ -87,7 +87,3 @@ Progress is stored as JSON at `%AppData%\TDGachaGame\save.json`. Delete it to st
 ## Tech
 
 C# · .NET 10 · Windows Forms (WPF `MediaPlayer` for audio)
-
-## License
-
-No license yet. Add one (e.g. MIT) if you want others to reuse the code.
