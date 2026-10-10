@@ -1,0 +1,490 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace TDGachaGame
+{
+    public class FloorMap
+    {
+        public int Rows
+        {
+            get;
+        }
+
+        public int Cols
+        {
+            get;
+        }
+
+        public Tile[,] Tiles
+        {
+            get;
+        }
+
+        public (int row, int col) Entrance
+        {
+            get;
+            private set;
+        }
+
+        public (int row, int col) Exit
+        {
+            get;
+            private set;
+        }
+
+        private static readonly Random rng = new Random();
+
+        private static readonly (int dr, int dc)[] Directions =
+        {
+            (0, 1),
+            (1, 0),
+            (-1, 0),
+            (0, -1)
+        };
+
+        private List<(int r, int c)> pathPositions;
+
+        public FloorMap(int rows, int cols)
+        {
+            Rows = rows;
+            Cols = cols;
+            Tiles = new Tile[rows, cols];
+        }
+
+        public static FloorMap Generate(int stageNumber)
+        {
+            int size = 12 + (stageNumber / 5);
+
+            while (true)
+            {
+                var map = new FloorMap(size, size);
+                for (int r = 0; r < size; r++)
+                {
+                    for (int c = 0; c < size; c++)
+                    {
+                        map.Tiles[r, c] =
+                            new Tile(r, c, TileType.Open);
+                    }
+                }
+
+                map.Entrance = map.GetRandomBorderPosition();
+                do
+                {
+                    map.Exit = map.GetRandomBorderPosition();
+                }
+                while (map.Exit == map.Entrance || map.DistanceBetween(map.Entrance, map.Exit) < size / 2);
+
+                if (map.CarvePath())
+                {
+                    map.CollectPathPositions();
+                    map.ScatterFeatures(stageNumber);
+
+                    return map;
+                }
+            }
+        }
+        private (int row, int col) GetRandomBorderPosition()
+        {
+            int side = rng.Next(4);
+
+            switch (side)
+            {
+                case 0:return (0, rng.Next(Cols));
+                case 1:return (rng.Next(Rows), Cols - 1);
+                case 2:return (Rows - 1, rng.Next(Cols));
+                default:return (rng.Next(Rows), 0);
+            }
+        }
+
+        private int DistanceBetween(
+            (int row, int col) a,
+            (int row, int col) b)
+        {
+            return Math.Abs(a.row - b.row) +
+                   Math.Abs(a.col - b.col);
+        }
+        public List<(int r, int c)> PathWaypoints
+        {
+            get;
+            private set;
+        }
+
+        private bool CarvePath()
+        {
+            var current = Entrance;
+            SetTile(current, TileType.Entrance);
+            var orderedPath = new List<(int r, int c)> { current };
+            var visited = new HashSet<(int, int)>
+            {
+                current
+            };
+            (int dr, int dc) direction =GetInitialDirection(Entrance);
+            int turnDirection = rng.Next(2) == 0 ? -1 : 1;
+            int wanderingSteps = rng.Next(5,11);
+
+            int steps = 0;
+
+            while (current != Exit)
+            {
+                var options = new List<(int r, int c)>();
+
+                foreach (var dir in Directions)
+                {
+                    var next = (
+                        current.Item1 + dir.dr,
+                        current.Item2 + dir.dc
+                    );
+
+                    if (!InBounds(next))
+                    {
+                        continue;
+                    }
+
+                    if (visited.Contains(next))
+                    {
+                        continue;
+                    }
+
+                    if (WouldCreateThickPath(next, current))
+                    {
+                        continue;
+                    }
+
+                    options.Add(next);
+                }
+
+                if (options.Count == 0)
+                {
+                    return false;
+                }
+                if (steps >= wanderingSteps)
+                {
+                    if (rng.NextDouble() < 0.65)
+                    {
+                    }
+                    else
+                    {
+                        turnDirection *= -1;
+                    }
+
+                    wanderingSteps = rng.Next(5,11);
+                    steps = 0;
+                }
+
+                int directionIndex =GetDirectionIndex(direction);
+                var forward = direction;
+
+                var left =
+                    Directions[(directionIndex + 3) % 4];
+
+                var right =
+                    Directions[(directionIndex + 1) % 4];
+
+                var preferredTurn =
+                    turnDirection == -1 ? left : right;
+
+                var forwardPosition = (
+                    current.Item1 + forward.dr,
+                    current.Item2 + forward.dc
+                );
+
+                var turnPosition = (
+                    current.Item1 + preferredTurn.dr,
+                    current.Item2 + preferredTurn.dc
+                );
+                double roll = rng.NextDouble();
+
+                (int r, int c) selected;
+                if (roll < 0.25 && options.Contains(forwardPosition))
+                {
+                    selected = forwardPosition;
+                }
+                else if (roll < 0.80 &&
+                         options.Contains(turnPosition))
+                {
+                    selected = turnPosition;
+                }
+                else
+                {
+                    selected = ChooseRandomOption(
+                        options,
+                        current
+                    );
+                }
+
+                direction = (
+                    selected.r - current.Item1,
+                    selected.c - current.Item2
+                );
+
+                current = selected;
+
+                visited.Add(current);
+                orderedPath.Add(current);
+
+                if (current != Exit)
+                {
+                    SetTile(current, TileType.Path);
+                }
+
+                steps++;
+            }
+
+            SetTile(Exit, TileType.Exit);
+            if (visited.Count < 13)
+            {
+                return false;
+            }
+            PathWaypoints = orderedPath;
+            return true;
+        }
+        private (int dr, int dc) GetInitialDirection((int row, int col) entrance)
+        {
+            if (entrance.row == 0)
+            {
+                return (1, 0);
+            }
+            if (entrance.row == Rows - 1)
+            {
+                return (-1, 0);
+            }
+            if (entrance.col == 0)
+            {
+                return (0, 1);
+            }
+            return (0, -1);
+        }
+
+        private (int r, int c) ChooseRandomOption(
+            List<(int r, int c)> options,
+            (int r, int c) current)
+        {
+            if (rng.NextDouble() < 0.7)
+            {
+                return options[rng.Next(options.Count)];
+            }
+
+            return options
+                .OrderBy(x =>
+                    DistanceToExit(x) +
+                    rng.Next(0, 12))
+                .First();
+        }
+
+        private int GetDirectionIndex(
+            (int dr, int dc) direction)
+        {
+            for (int i = 0; i < Directions.Length; i++)
+            {
+                if (Directions[i] == direction)
+                {
+                    return i;
+                }
+            }
+
+            return 0;
+        }
+
+        private bool WouldCreateThickPath(
+            (int r, int c) candidate,
+            (int r, int c) current)
+        {
+            foreach (var dir in Directions)
+            {
+                var neighbor = (
+                    candidate.r + dir.dr,
+                    candidate.c + dir.dc
+                );
+
+                if (neighbor == current)
+                {
+                    continue;
+                }
+
+                if (!InBounds(neighbor))
+                {
+                    continue;
+                }
+
+                var neighborType =
+                    Tiles[neighbor.Item1, neighbor.Item2].Type;
+
+                if (neighborType == TileType.Path ||
+                    neighborType == TileType.Entrance)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private int DistanceToExit(
+            (int r, int c) pos)
+        {
+            return Math.Abs(pos.r - Exit.row) +
+                   Math.Abs(pos.c - Exit.col);
+        }
+
+        private void CollectPathPositions()
+        {
+            pathPositions =
+                new List<(int r, int c)>();
+
+            for (int r = 0; r < Rows; r++)
+            {
+                for (int c = 0; c < Cols; c++)
+                {
+                    var type = Tiles[r, c].Type;
+
+                    if (type == TileType.Path ||
+                        type == TileType.Entrance ||
+                        type == TileType.Exit)
+                    {
+                        pathPositions.Add((r, c));
+                    }
+                }
+            }
+        }
+
+        private bool IsNearPath((int r, int c) pos,int range)
+        {
+            foreach (var p in pathPositions)
+            {
+                int distance =
+                    Math.Abs(pos.r - p.r) +
+                    Math.Abs(pos.c - p.c);
+
+                if (distance <= range)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void ScatterFeatures(int stageNumber)
+        {
+            for (int r = 0; r < Rows; r++)
+            {
+                for (int c = 0; c < Cols; c++)
+                {
+                    if (Tiles[r, c].Type != TileType.Open)
+                    {
+                        continue;
+                    }
+
+                    var position = (r, c);
+
+                    bool nearPath = IsNearPath(position, 2);
+
+                    bool nearEntrance =
+                        DistanceBetween(position, Entrance) <= 3;
+
+                    bool nearExit =
+                        DistanceBetween(position, Exit) <= 3;
+
+                    double roll = rng.NextDouble();
+                    if (roll < 0.15)
+                    {
+                        Tiles[r, c].Type = TileType.Obstacle;
+                    }
+                    else if (roll < 0.30 &&
+                             nearPath &&
+                             !nearEntrance &&
+                             !nearExit &&
+                             CanPlaceElevated(r, c))
+                    {
+                        Tiles[r, c].Type = TileType.Elevated;
+                    }
+                }
+            }
+        }
+        private bool CanPlaceElevated(int r, int c)
+        {
+            if (r > 0 &&
+                Tiles[r - 1, c].Type == TileType.Elevated)
+            {
+                return false;
+            }
+            if (c > 0 &&
+                Tiles[r, c - 1].Type == TileType.Elevated)
+            {
+                return false;
+            }
+            if (c < Cols - 1 &&
+                Tiles[r, c + 1].Type == TileType.Elevated)
+            {
+                return false;
+            }
+            return true;
+        }
+
+        private void SetTile(
+            (int r, int c) pos,
+            TileType type)
+        {
+            Tiles[pos.r, pos.c].Type = type;
+        }
+
+        private bool InBounds(
+            (int r, int c) pos)
+        {
+            return pos.r >= 0 &&
+                   pos.r < Rows &&
+                   pos.c >= 0 &&
+                   pos.c < Cols;
+        }
+
+        public bool ValidateConnectivity()
+        {
+            var visited =
+                new HashSet<(int, int)>();
+
+            var queue =
+                new Queue<(int, int)>();
+
+            queue.Enqueue(Entrance);
+            visited.Add(Entrance);
+
+            while (queue.Count > 0)
+            {
+                var cur = queue.Dequeue();
+
+                if (cur == Exit)
+                {
+                    return true;
+                }
+
+                foreach (var dir in Directions)
+                {
+                    var next = (
+                        cur.Item1 + dir.dr,
+                        cur.Item2 + dir.dc
+                    );
+
+                    if (!InBounds(next) ||
+                        visited.Contains(next))
+                    {
+                        continue;
+                    }
+
+                    var type =
+                        Tiles[next.Item1, next.Item2].Type;
+
+                    if (type == TileType.Path ||
+                        type == TileType.Entrance ||
+                        type == TileType.Exit)
+                    {
+                        visited.Add(next);
+                        queue.Enqueue(next);
+                    }
+                }
+            }
+
+            return false;
+        }
+    }
+}

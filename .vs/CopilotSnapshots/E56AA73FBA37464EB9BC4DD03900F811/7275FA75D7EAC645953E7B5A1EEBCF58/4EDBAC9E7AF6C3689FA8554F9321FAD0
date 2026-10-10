@@ -1,0 +1,403 @@
+﻿using System;
+using System.Collections.Generic;
+
+namespace TDGachaGame
+{
+    public class EnemyManager
+    {
+        private enum WaveState
+        {
+            Spawning,
+            InterWaveDelay,
+            AllWavesComplete
+        }
+
+        public int BaseHealth
+        {
+            get;
+            private set;
+        }
+
+        public List<Enemy> ActiveEnemies
+        {
+            get;
+        } = new List<Enemy>();
+
+        public int CurrentWaveNumber
+        {
+            get;
+            private set;
+        }
+
+        public int TotalWaves
+        {
+            get;
+        }
+
+        public float ElapsedSeconds
+        {
+            get;
+            private set;
+        }
+
+        public bool IsBetweenWaves => state == WaveState.InterWaveDelay;
+
+        public float TimeUntilNextWave => IsBetweenWaves
+            ? Math.Max(0f, WaveGapSeconds - interWaveTimer)
+            : 0f;
+        public bool AwaitingEarlyWaveCall
+        {
+            get;
+            private set;
+        }
+
+        private readonly List<List<Enemy>> waves;
+        private int waveIndex;
+        private Queue<Enemy> spawnQueue = new Queue<Enemy>();
+        private float spawnTimer;
+        private float interWaveTimer;
+        private float waveElapsedSeconds;
+        private bool earlyCallOffered;
+        private WaveState state;
+
+        private const float SpawnInterval = 0.8f;
+        private const float WaveGapSeconds = 3f;
+        private const float EarlyCallThresholdSeconds = 30f;
+        private const float LineTrapFlatDamage = 15f;
+        // Traps are intentionally weaker than full towers; scale tower-tier effects
+        // down when applying trap effects.
+        private const float TrapEffectScale = 0.6f;
+
+        private readonly List<(int r, int c)> waypoints;
+        private int pendingCashReward;
+
+        public bool FloorCleared => state == WaveState.AllWavesComplete;
+        public bool BaseDestroyed => BaseHealth <= 0;
+
+        public EnemyManager(FloorMap floor, List<List<Enemy>> enemyWaves, int baseHealth = 20)
+        {
+            waypoints = floor.PathWaypoints;
+            BaseHealth = baseHealth;
+
+            waves = enemyWaves;
+            TotalWaves = Math.Max(1, waves.Count);
+
+            waveIndex = 0;
+            CurrentWaveNumber = 1;
+            LoadWave(waveIndex);
+        }
+
+        private void LoadWave(int index)
+        {
+            spawnQueue = new Queue<Enemy>();
+
+            if (index < waves.Count)
+            {
+                foreach (var enemy in waves[index])
+                {
+                    spawnQueue.Enqueue(enemy);
+                }
+            }
+
+            CurrentWaveNumber = index + 1;
+            spawnTimer = 0f;
+            waveElapsedSeconds = 0f;
+            earlyCallOffered = false;
+            AwaitingEarlyWaveCall = false;
+            state = WaveState.Spawning;
+        }
+
+        public void ConfirmEarlyWaveCall()
+        {
+            if (!AwaitingEarlyWaveCall || waveIndex + 1 >= waves.Count)
+            {
+                return;
+            }
+
+            waveIndex++;
+
+            foreach (var enemy in waves[waveIndex])
+            {
+                spawnQueue.Enqueue(enemy);
+            }
+
+            CurrentWaveNumber = waveIndex + 1;
+            waveElapsedSeconds = 0f;
+            earlyCallOffered = false;
+            AwaitingEarlyWaveCall = false;
+        }
+        public void DeclineEarlyWaveCall()
+        {
+            AwaitingEarlyWaveCall = false;
+        }
+
+        public void Update(float deltaSeconds)
+        {
+            if (!BaseDestroyed && !FloorCleared)
+            {
+                ElapsedSeconds += deltaSeconds;
+            }
+
+            UpdateSpawning(deltaSeconds);
+            UpdateActiveEnemies(deltaSeconds);
+            UpdateWaveTransition(deltaSeconds);
+            UpdateEarlyWaveCallPrompt(deltaSeconds);
+        }
+
+        private void UpdateEarlyWaveCallPrompt(float deltaSeconds)
+        {
+            if (state != WaveState.Spawning)
+            {
+                return;
+            }
+
+            if (AwaitingEarlyWaveCall || earlyCallOffered)
+            {
+                return;
+            }
+
+            if (waveIndex + 1 >= waves.Count)
+            {
+                return;
+            }
+
+            waveElapsedSeconds += deltaSeconds;
+
+            if (waveElapsedSeconds >= EarlyCallThresholdSeconds)
+            {
+                AwaitingEarlyWaveCall = true;
+                earlyCallOffered = true;
+            }
+        }
+
+        private void UpdateWaveTransition(float deltaSeconds)
+        {
+            if (state != WaveState.Spawning)
+            {
+                if (state == WaveState.InterWaveDelay)
+                {
+                    interWaveTimer += deltaSeconds;
+
+                    if (interWaveTimer >= WaveGapSeconds)
+                    {
+                        interWaveTimer = 0f;
+                        waveIndex++;
+                        LoadWave(waveIndex);
+                    }
+                }
+
+                return;
+            }
+
+            bool waveDrained = spawnQueue.Count == 0 && ActiveEnemies.Count == 0;
+
+            if (!waveDrained)
+            {
+                return;
+            }
+
+            if (waveIndex + 1 < waves.Count)
+            {
+                state = WaveState.InterWaveDelay;
+                interWaveTimer = 0f;
+            }
+            else
+            {
+                state = WaveState.AllWavesComplete;
+            }
+
+            pendingCashReward += GetWaveClearReward();
+        }
+
+        private void UpdateSpawning(float deltaSeconds)
+        {
+            if (spawnQueue.Count == 0)
+            {
+                return;
+            }
+
+            spawnTimer += deltaSeconds;
+
+            if (spawnTimer >= SpawnInterval)
+            {
+                spawnTimer = 0f;
+                ActiveEnemies.Add(spawnQueue.Dequeue());
+            }
+        }
+
+        private void UpdateActiveEnemies(float deltaSeconds)
+        {
+            for (int i = ActiveEnemies.Count - 1; i >= 0; i--)
+            {
+                var enemy = ActiveEnemies[i];
+
+                if (enemy.IsDead)
+                {
+                    pendingCashReward += GetKillReward(enemy);
+                    ActiveEnemies.RemoveAt(i);
+                    ActiveEnemies.AddRange(enemy.OnDeath());
+                    continue;
+                }
+
+                enemy.Advance(deltaSeconds);
+
+                if (enemy.PathProgress >= waypoints.Count - 1)
+                {
+                    BaseHealth -= enemy.DamageToExit;
+                    ActiveEnemies.RemoveAt(i);
+                }
+            }
+        }
+
+        // Returns the enemy's true position in tile-center coordinates — i.e. the same
+        // frame of reference as a tower's (Row + 0.5, Col + 0.5). Waypoints themselves
+        // are stored as raw grid indices (a path tile's top-left corner, not its
+        // center), so both the "from" and "to" waypoint get shifted by half a tile
+        // before interpolating between them. Previously this shift was missing here and
+        // instead bolted on only at the render site (Form1.DrawEnemies), which meant
+        // every distance/angle check in TowerManager (range tests, facing, beam aim)
+        // was silently comparing a tower's centered position against an enemy position
+        // that was still anchored a half-tile off — a constant diagonal offset that
+        // shows up as targeting looking "a bit off" up close (where that half-tile is a
+        // big chunk of the distance) and as the effective range boundary depending on
+        // which side an enemy approaches from. Centering it here fixes it everywhere at
+        // once instead of needing every caller to remember to add 0.5 itself.
+        public (float r, float c) GetInterpolatedPosition(Enemy enemy)
+        {
+            int index = (int)enemy.PathProgress;
+            index = System.Math.Min(index, waypoints.Count - 1);
+
+            if (index >= waypoints.Count - 1)
+            {
+                var last = waypoints[waypoints.Count - 1];
+                return (last.r + 0.5f, last.c + 0.5f);
+            }
+
+            var from = waypoints[index];
+            var to = waypoints[index + 1];
+            float t = enemy.PathProgress - index;
+
+            return (from.r + 0.5f + (to.r - from.r) * t, from.c + 0.5f + (to.c - from.c) * t);
+        }
+        public void ApplyLineTrapDamage(IReadOnlyList<PlacedShape> placedShapes)
+        {
+            Dictionary<(int r, int c), ShapeColor> trapTiles = null;
+
+            foreach (var enemy in ActiveEnemies)
+            {
+                int currentIndex = Math.Min((int)enemy.PathProgress, waypoints.Count - 1);
+
+                // Only trigger when the enemy reaches a tile index it hasn't already
+                // triggered a trap on. This has to be a one-way high-water mark, not just
+                // "did the index change" — Cyan's knockback lowers PathProgress, and an
+                // equality check would treat that lower index as "new" again, re-firing
+                // the same trap and knocking the enemy back forever.
+                if (currentIndex <= enemy.LastTrapCheckIndex)
+                {
+                    continue;
+                }
+
+                enemy.LastTrapCheckIndex = currentIndex;
+
+                if (trapTiles == null)
+                {
+                    trapTiles = new Dictionary<(int r, int c), ShapeColor>();
+
+                    foreach (var shape in placedShapes)
+                    {
+                        if (shape.Type == ShapeType.Line)
+                        {
+                            trapTiles[(shape.Row, shape.Col)] = shape.Color;
+                        }
+                    }
+                }
+
+                var cell = waypoints[currentIndex];
+
+                if (trapTiles.TryGetValue((cell.r, cell.c), out ShapeColor color))
+                {
+                    ApplyLineTrapEffect(enemy, color, cell, placedShapes);
+                }
+            }
+        }
+
+        // Approximates the Line ability table from the design doc. Black's "also affects
+        // adjacent elevated tiles" piece is still stubbed. Blue grounds an elevated
+        // enemy, briefly exposing it to ground-only towers (a no-op against anything
+        // that wasn't elevated to begin with). White gives a 1.2x attack-speed pulse to
+        // every tower (not another Line trap) on an adjacent tile — including
+        // diagonals — when an enemy triggers it.
+        private void ApplyLineTrapEffect(Enemy enemy, ShapeColor color, (int r, int c) trapPosition, IReadOnlyList<PlacedShape> placedShapes)
+        {
+            switch (color)
+            {
+                case ShapeColor.Black:
+                    enemy.TakeDamage(LineTrapFlatDamage * 1.2f);
+                    enemy.ApplySlow(0.6f, 2f);
+                    break;
+
+                case ShapeColor.White:
+                    foreach (var ally in placedShapes)
+                    {
+                        if (ally.Type == ShapeType.Line)
+                        {
+                            continue;
+                        }
+
+                        int rowDistance = Math.Abs(ally.Row - trapPosition.r);
+                        int colDistance = Math.Abs(ally.Col - trapPosition.c);
+
+                        // Adjacent = the 8 surrounding tiles (Chebyshev distance 1),
+                        // i.e. a 3x3 block centered on the trap.
+                        if (Math.Max(rowDistance, colDistance) <= 1)
+                        {
+                            ally.ApplyAttackDamageBuff(WhiteTrapBuffMultiplier, WhiteTrapBuffDurationSeconds);
+                        }
+                    }
+                    break;
+
+                case ShapeColor.Red:
+                    enemy.ApplyBurn(12f, 2f);
+                    break;
+
+                case ShapeColor.Purple:
+                    enemy.ApplyStun(1.5f);
+                    break;
+
+                case ShapeColor.Cyan:
+                    enemy.ApplyKnockback(2.5f);
+                    break;
+
+                case ShapeColor.Green:
+                    enemy.ApplyPoison(4f, 4f);
+                    break;
+
+                case ShapeColor.Blue:
+                    enemy.ApplyGrounded(2.5f);
+                    break;
+
+                case ShapeColor.Yellow:
+                    enemy.TakeDamage(LineTrapFlatDamage * 0.4f);
+                    enemy.ApplySlow(0.5f, 1.2f);
+                    break;
+            }
+        }
+
+        public int ConsumeCashReward()
+        {
+            int amount = pendingCashReward;
+            pendingCashReward = 0;
+            return amount;
+        }
+
+        private int GetKillReward(Enemy enemy)
+        {
+            return Math.Max(3, (int)(enemy.MaxHealth / 5f));
+        }
+
+        private int GetWaveClearReward()
+        {
+            return 25 + CurrentWaveNumber * 4;
+        }
+    }
+}

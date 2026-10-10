@@ -1,0 +1,714 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace TDGachaGame
+{
+    public class TowerManager
+    {
+        private static readonly Dictionary<ShapeColor, (float halfWidth, float halfHeight)> RangeExtentsByColor =
+            new Dictionary<ShapeColor, (float, float)>
+            {
+                [ShapeColor.Yellow] = (1.5f, 1.0f),
+                [ShapeColor.Red] = (2.5f, 2.5f),
+                [ShapeColor.Purple] = (1.5f, 2.0f),
+                [ShapeColor.Cyan] = (2.5f, 1.5f),
+                [ShapeColor.Green] = (1.5f, 1.5f),
+                [ShapeColor.Black] = (2.0f, 2.0f),
+                [ShapeColor.White] = (2.5f, 2.5f),
+                [ShapeColor.Blue] = (3.5f, 3.5f),
+            };
+
+        private static readonly Dictionary<ShapeColor, (float halfWidth, float halfHeight)> SquareRangeExtentsByColor =
+            new Dictionary<ShapeColor, (float, float)>
+            {
+                [ShapeColor.Yellow] = (2.0f, 2.0f),
+                [ShapeColor.Red] = (2.5f, 2.5f),
+                [ShapeColor.Purple] = (2.2f, 2.2f),
+                [ShapeColor.Cyan] = (2.4f, 2.4f),
+                [ShapeColor.Green] = (2.2f, 2.2f),
+                [ShapeColor.Black] = (2.3f, 2.3f),
+                [ShapeColor.White] = (2.6f, 2.6f),
+                [ShapeColor.Blue] = (3.0f, 3.0f),
+            };
+
+        private const float TriangleTurnRateDegreesPerSecond = 720f;
+        private const float ShotEffectDurationSeconds = 0.18f;
+
+        private const float BombEffectDurationSeconds = 0.3f;
+
+        private const float ChainBlastDamageFalloff = 0.6f;
+
+        public class ShotEffect
+        {
+            public float FromRow;
+            public float FromCol;
+            public float ToRow;
+            public float ToCol;
+            public float Age;
+            public float Duration;
+            public ShapeColor Color;
+
+            public float CorridorHalfWidth;
+        }
+
+        public class BombEffect
+        {
+            public float Row;
+            public float Col;
+            public float Radius;
+            public float Age;
+            public float Duration;
+            public ShapeColor Color;
+        }
+
+        public List<ShotEffect> ActiveShotEffects { get; } = new List<ShotEffect>();
+        public List<BombEffect> ActiveBombEffects { get; } = new List<BombEffect>();
+
+        public static (float halfWidth, float halfHeight) GetTriangleRangeExtents(ShapeColor color)
+        {
+            return RangeExtentsByColor.TryGetValue(color, out var extents) ? extents : (1.5f, 1.5f);
+        }
+
+        public static (float halfWidth, float halfHeight) GetOrientedRangeExtents(ShapeColor color, int rotationDegrees, float rangeMultiplier)
+        {
+            var (baseHalfWidth, baseHalfHeight) = GetTriangleRangeExtents(color);
+            float halfWidth = baseHalfWidth * rangeMultiplier;
+            float halfHeight = baseHalfHeight * rangeMultiplier;
+
+            int normalized = ((rotationDegrees % 360) + 360) % 360;
+            bool sideways = normalized == 90 || normalized == 270;
+            return sideways ? (halfHeight, halfWidth) : (halfWidth, halfHeight);
+        }
+
+        public static (float halfWidth, float halfHeight) GetOrientedRangeExtentsForShape(PlacedShape shape)
+        {
+            return GetOrientedRangeExtents(shape.Color, shape.Rotation, shape.GetRangeMultiplier());
+        }
+
+        public static (float halfWidth, float halfHeight) GetSquareRangeExtents(ShapeColor color)
+        {
+            return SquareRangeExtentsByColor.TryGetValue(color, out var extents) ? extents : (2.0f, 2.0f);
+        }
+
+        public static (float halfWidth, float halfHeight) GetOrientedSquareRangeExtents(ShapeColor color, int rotationDegrees, float rangeMultiplier)
+        {
+            var (baseHalfWidth, baseHalfHeight) = GetSquareRangeExtents(color);
+            return (baseHalfWidth * rangeMultiplier, baseHalfHeight * rangeMultiplier);
+        }
+
+        public static (float halfWidth, float halfHeight) GetOrientedSquareRangeExtentsForShape(PlacedShape shape)
+        {
+            return GetOrientedSquareRangeExtents(shape.Color, shape.Rotation, shape.GetRangeMultiplier());
+        }
+
+        private static (bool canGround, bool canElevated, bool prioritizeElevated) GetTargetingProfile(ShapeColor color)
+        {
+            return color switch
+            {
+                ShapeColor.Blue => (true, true, true),
+                ShapeColor.Black => (true, true, false),
+                _ => (true, false, false)
+            };
+        }
+
+
+        private static bool PrefersUnaffectedTargets(ShapeColor color)
+        {
+            return color == ShapeColor.Purple || color == ShapeColor.Green;
+        }
+
+        private static bool IsAlreadyAffected(ShapeColor color, Enemy enemy)
+        {
+            return color switch
+            {
+                ShapeColor.Purple => enemy.IsStunned,
+                ShapeColor.Green => enemy.IsAffectedByDot,
+                _ => false
+            };
+        }
+
+
+        private static float GetBaseCorridorHalfWidth(ShapeColor color)
+        {
+            return color == ShapeColor.Cyan ? 1.0f : 0.5f;
+        }
+
+        public void Update(List<PlacedShape> placedShapes, EnemyManager enemyManager, float deltaSeconds)
+        {
+            if (enemyManager == null) return;
+
+            foreach (var shape in placedShapes)
+            {
+                if (shape.Type != ShapeType.Triangle && shape.Type != ShapeType.Square) continue;
+
+                if (shape.Type == ShapeType.Triangle)
+                {
+                    UpdateTriangleFacing(shape, enemyManager, deltaSeconds);
+                }
+
+                if (shape.AttackSpeedBuffTimeRemaining > 0f)
+                {
+                    shape.AttackSpeedBuffTimeRemaining = Math.Max(0f, shape.AttackSpeedBuffTimeRemaining - deltaSeconds);
+                }
+
+                if (shape.AttackDamageBuffTimeRemaining > 0f)
+                {
+                    shape.AttackDamageBuffTimeRemaining = Math.Max(0f, shape.AttackDamageBuffTimeRemaining - deltaSeconds);
+                }
+
+                if (shape.AttackCooldownRemaining > 0f)
+                {
+                    float speedMultiplier = shape.AttackSpeedBuffTimeRemaining > 0f ? shape.AttackSpeedBuffMultiplier : 1f;
+                    shape.AttackCooldownRemaining -= deltaSeconds * speedMultiplier;
+                    continue;
+                }
+
+                if (shape.Type == ShapeType.Triangle)
+                {
+                    TryFireTriangle(shape, placedShapes, enemyManager);
+                }
+                else
+                {
+                    TryFireSquare(shape, placedShapes, enemyManager);
+                }
+            }
+
+            for (int i = ActiveShotEffects.Count - 1; i >= 0; i--)
+            {
+                var effect = ActiveShotEffects[i];
+                effect.Age += deltaSeconds;
+                if (effect.Age >= effect.Duration)
+                {
+                    ActiveShotEffects.RemoveAt(i);
+                }
+            }
+
+            for (int i = ActiveBombEffects.Count - 1; i >= 0; i--)
+            {
+                var effect = ActiveBombEffects[i];
+                effect.Age += deltaSeconds;
+                if (effect.Age >= effect.Duration)
+                {
+                    ActiveBombEffects.RemoveAt(i);
+                }
+            }
+        }
+
+        private void UpdateTriangleFacing(PlacedShape shape, EnemyManager enemyManager, float deltaSeconds)
+        {
+            if (shape.Color == ShapeColor.White)
+            {
+                shape.FacingDegrees = shape.Rotation;
+                return;
+            }
+
+            var (halfWidth, halfHeight) = GetOrientedRangeExtentsForShape(shape);
+            var (canGround, canElevated, prioritizeElevated) = GetTargetingProfile(shape.Color);
+
+            Enemy target = FindPriorityEnemyInRange(shape, enemyManager, halfWidth, halfHeight, canGround, canElevated, prioritizeElevated, null);
+            if (target == null) return;
+
+            float? desiredDegrees = GetDesiredFacingDegrees(shape, enemyManager, target);
+            if (desiredDegrees.HasValue)
+            {
+                shape.FacingDegrees = RotateTowards(shape.FacingDegrees, desiredDegrees.Value, TriangleTurnRateDegreesPerSecond * deltaSeconds);
+            }
+        }
+
+        private static float? GetDesiredFacingDegrees(PlacedShape shape, EnemyManager enemyManager, Enemy target)
+        {
+            var (er, ec) = enemyManager.GetInterpolatedPosition(target);
+            float dr = er - (shape.Row + 0.5f);
+            float dc = ec - (shape.Col + 0.5f);
+
+            if (Math.Abs(dr) < 0.0001f && Math.Abs(dc) < 0.0001f) return null;
+            return (float)(Math.Atan2(dc, -dr) * 180.0 / Math.PI);
+        }
+
+        private static float RotateTowards(float currentDegrees, float targetDegrees, float maxDeltaDegrees)
+        {
+            float diff = NormalizeAngle(targetDegrees - currentDegrees);
+            if (Math.Abs(diff) <= maxDeltaDegrees) return NormalizeAngle(targetDegrees);
+            return NormalizeAngle(currentDegrees + Math.Sign(diff) * maxDeltaDegrees);
+        }
+
+        private static float NormalizeAngle(float degrees)
+        {
+            degrees %= 360f;
+            if (degrees > 180f) degrees -= 360f;
+            else if (degrees < -180f) degrees += 360f;
+            return degrees;
+        }
+
+
+        private Enemy FindPriorityEnemyInRange(PlacedShape shape, EnemyManager enemyManager,
+            float halfWidth, float halfHeight, bool canGround, bool canElevated, bool prioritizeElevated,
+            HashSet<Enemy> excludeSet)
+        {
+            float towerRow = shape.Row + 0.5f;
+            float towerCol = shape.Col + 0.5f;
+
+            List<Enemy> validEnemies = new List<Enemy>();
+
+            foreach (var enemy in enemyManager.ActiveEnemies)
+            {
+                if (excludeSet != null && excludeSet.Contains(enemy)) continue;
+
+                bool elevated = enemy.IsElevated;
+                if (elevated && !canElevated) continue;
+                if (!elevated && !canGround) continue;
+
+                var (er, ec) = enemyManager.GetInterpolatedPosition(enemy);
+                float dr = er - towerRow;
+                float dc = ec - towerCol;
+
+                if (!IsInRectRange(dr, dc, halfWidth, halfHeight)) continue;
+                validEnemies.Add(enemy);
+            }
+
+            if (validEnemies.Count == 0) return null;
+
+            if (prioritizeElevated)
+            {
+                var elevatedEnemies = validEnemies.Where(e => e.IsElevated).ToList();
+                if (elevatedEnemies.Count > 0) validEnemies = elevatedEnemies;
+            }
+
+            if (PrefersUnaffectedTargets(shape.Color))
+            {
+                var unaffectedEnemies = validEnemies.Where(e => !IsAlreadyAffected(shape.Color, e)).ToList();
+                if (unaffectedEnemies.Count > 0) validEnemies = unaffectedEnemies;
+            }
+
+            switch (shape.TargetingMode)
+            {
+                case TargetingMode.First:
+                    return validEnemies.OrderByDescending(e => e.PathProgress).First();
+                case TargetingMode.Last:
+                    return validEnemies.OrderBy(e => e.PathProgress).First();
+                case TargetingMode.Closest:
+                    return validEnemies.OrderBy(e =>
+                    {
+                        var (er, ec) = enemyManager.GetInterpolatedPosition(e);
+                        float dr = er - towerRow;
+                        float dc = ec - towerCol;
+                        return dr * dr + dc * dc;
+                    }).First();
+                case TargetingMode.Farthest:
+                    return validEnemies.OrderByDescending(e =>
+                    {
+                        var (er, ec) = enemyManager.GetInterpolatedPosition(e);
+                        float dr = er - towerRow;
+                        float dc = ec - towerCol;
+                        return dr * dr + dc * dc;
+                    }).First();
+                case TargetingMode.LowestHp:
+                    return validEnemies.OrderBy(e => e.CurrentHealth / e.MaxHealth).First();
+                case TargetingMode.HighestHp:
+                    return validEnemies.OrderByDescending(e => e.CurrentHealth / e.MaxHealth).First();
+                default:
+                    return validEnemies.OrderByDescending(e => e.PathProgress).First();
+            }
+        }
+
+        private void TryFireTriangle(PlacedShape shape, List<PlacedShape> placedShapes, EnemyManager enemyManager)
+        {
+            var (halfWidth, halfHeight) = GetOrientedRangeExtentsForShape(shape);
+
+            if (shape.Color == ShapeColor.White)
+            {
+                if (BuffAlliesInRange(shape, placedShapes, halfWidth, halfHeight))
+                {
+                    shape.AttackCooldownRemaining = shape.GetCurrentAttackInterval();
+                }
+                return;
+            }
+
+            var (canGround, canElevated, prioritizeElevated) = GetTargetingProfile(shape.Color);
+
+            Enemy primary = FindPriorityEnemyInRange(shape, enemyManager, halfWidth, halfHeight, canGround, canElevated, prioritizeElevated, null);
+            if (primary == null) return;
+
+            var targets = FindEnemiesAlongLineToward(shape, enemyManager, primary, halfWidth, halfHeight, canGround, canElevated);
+            ApplyTriangleEffect(shape, targets);
+            FireShotEffect(shape, enemyManager, primary, halfWidth, halfHeight);
+
+
+            var alreadyHit = new HashSet<Enemy>(targets);
+            int extraBeams = shape.GetExtraBeamCount();
+            for (int beam = 0; beam < extraBeams; beam++)
+            {
+                Enemy nextTarget = FindPriorityEnemyInRange(shape, enemyManager, halfWidth, halfHeight, canGround, canElevated, prioritizeElevated, alreadyHit);
+                if (nextTarget == null) break;
+
+                var nextTargets = FindEnemiesAlongLineToward(shape, enemyManager, nextTarget, halfWidth, halfHeight, canGround, canElevated);
+                ApplyTriangleEffect(shape, nextTargets);
+                FireShotEffect(shape, enemyManager, nextTarget, halfWidth, halfHeight);
+                alreadyHit.UnionWith(nextTargets);
+            }
+
+            shape.AttackCooldownRemaining = shape.GetCurrentAttackInterval();
+        }
+
+        private void FireShotEffect(PlacedShape shape, EnemyManager enemyManager, Enemy target, float halfWidth, float halfHeight)
+        {
+            float towerRow = shape.Row + 0.5f;
+            float towerCol = shape.Col + 0.5f;
+            var (targetRow, targetCol) = enemyManager.GetInterpolatedPosition(target);
+            float dirRow = targetRow - towerRow;
+            float dirCol = targetCol - towerCol;
+            float length = (float)Math.Sqrt(dirRow * dirRow + dirCol * dirCol);
+
+            if (length > 0.0001f)
+            {
+                dirRow /= length;
+                dirCol /= length;
+                shape.FacingDegrees = (float)(Math.Atan2(dirCol, -dirRow) * 180.0 / Math.PI);
+            }
+
+            float reach = GetReachAlongDirection(dirRow, dirCol, halfWidth, halfHeight);
+            float corridorHalfWidth = GetBaseCorridorHalfWidth(shape.Color) + shape.GetCorridorWidthBonus();
+
+            ActiveShotEffects.Add(new ShotEffect
+            {
+                FromRow = towerRow,
+                FromCol = towerCol,
+                ToRow = towerRow + dirRow * reach,
+                ToCol = towerCol + dirCol * reach,
+                Age = 0f,
+                Duration = ShotEffectDurationSeconds,
+                Color = shape.Color,
+                CorridorHalfWidth = corridorHalfWidth
+            });
+        }
+
+        private static float GetReachAlongDirection(float dirRow, float dirCol, float halfWidth, float halfHeight)
+        {
+            float reach = float.PositiveInfinity;
+            if (Math.Abs(dirCol) > 0.0001f) reach = Math.Min(reach, halfWidth / Math.Abs(dirCol));
+            if (Math.Abs(dirRow) > 0.0001f) reach = Math.Min(reach, halfHeight / Math.Abs(dirRow));
+            return float.IsPositiveInfinity(reach) ? halfWidth : reach;
+        }
+
+        private void ApplyTriangleEffect(PlacedShape shape, List<Enemy> targets)
+        {
+            if (targets.Count == 0) return;
+            float damage = shape.GetCurrentDamage();
+
+            switch (shape.Color)
+            {
+                case ShapeColor.Black:
+                    {
+                        float slowStrength = shape.GetSpecialValue1();
+                        float slowDuration = shape.GetSpecialValue2();
+                        foreach (var enemy in targets)
+                        {
+                            enemy.TakeDamage(damage);
+                            enemy.ApplySlow(slowStrength, slowDuration);
+                        }
+                        break;
+                    }
+                case ShapeColor.Red:
+                    targets[0].TakeDamage(damage);
+                    break;
+                case ShapeColor.Purple:
+                    targets[0].ApplyStun(shape.GetSpecialValue1());
+                    break;
+                case ShapeColor.Cyan:
+                    foreach (var enemy in targets)
+                    {
+                        enemy.TakeDamage(damage);
+                    }
+                    break;
+                case ShapeColor.Green:
+                    {
+                        float poisonDps = shape.GetSpecialValue1();
+                        float poisonDuration = shape.GetSpecialValue2();
+                        foreach (var enemy in targets)
+                        {
+                            enemy.ApplyPoison(poisonDps, poisonDuration);
+                        }
+                        break;
+                    }
+                case ShapeColor.Blue:
+                    targets[0].TakeDamage(damage);
+                    break;
+                case ShapeColor.Yellow:
+                    targets[0].TakeDamage(damage);
+                    break;
+            }
+        }
+
+        private bool BuffAlliesInRange(PlacedShape source, List<PlacedShape> placedShapes, float halfWidth, float halfHeight)
+        {
+            float towerRow = source.Row + 0.5f;
+            float towerCol = source.Col + 0.5f;
+            bool buffedAny = false;
+
+            float buffDuration = source.GetSpecialValue1();
+            float buffMultiplier = source.GetSpecialValue2();
+            float damageBuffMultiplier = source.GetDamageBuffMultiplier();
+
+            foreach (var ally in placedShapes)
+            {
+                if (ReferenceEquals(ally, source) || ally.Type == ShapeType.Line) continue;
+
+                float dr = ally.Row + 0.5f - towerRow;
+                float dc = ally.Col + 0.5f - towerCol;
+
+                if (!IsInRectRange(dr, dc, halfWidth, halfHeight)) continue;
+
+                ally.ApplyAttackSpeedBuff(buffMultiplier, buffDuration);
+                if (damageBuffMultiplier > 0f)
+                {
+                    ally.ApplyAttackDamageBuff(damageBuffMultiplier, buffDuration);
+                }
+                buffedAny = true;
+            }
+
+            return buffedAny;
+        }
+
+        // Square's whole attack loop: unlike Triangle's beam corridor, a Square finds
+        // one priority target within its (square-shaped) detection range, then drops
+        // its damage/effect on every enemy caught in a CIRCULAR blast radius around
+        // that target's actual position -- see ApplySquareBlast and FindEnemiesInBlast.
+        private void TryFireSquare(PlacedShape shape, List<PlacedShape> placedShapes, EnemyManager enemyManager)
+        {
+            var (halfWidth, halfHeight) = GetOrientedSquareRangeExtentsForShape(shape);
+
+            if (shape.Color == ShapeColor.White)
+            {
+                if (OverchargeAndBuffAlliesInRange(shape, placedShapes, halfWidth, halfHeight))
+                {
+                    shape.AttackCooldownRemaining = shape.GetCurrentAttackInterval();
+                }
+                return;
+            }
+
+            var (canGround, canElevated, prioritizeElevated) = GetTargetingProfile(shape.Color);
+
+            Enemy primary = FindPriorityEnemyInRange(shape, enemyManager, halfWidth, halfHeight, canGround, canElevated, prioritizeElevated, null);
+            if (primary == null) return;
+
+            float blastRadius = shape.GetCurrentBlastRadius();
+            var (targetRow, targetCol) = enemyManager.GetInterpolatedPosition(primary);
+            var hitEnemies = FindEnemiesInBlast(enemyManager, targetRow, targetCol, blastRadius, canGround, canElevated);
+            ApplySquareEffect(shape, hitEnemies);
+            FireBombEffect(shape, targetRow, targetCol, blastRadius);
+
+            // Black's capstone: chain the blast onto OTHER nearby enemies instead of
+            // just growing one blast bigger -- see the Square Black ladder in
+            // TowerUpgradeConfig, which reuses ExtraBeamCount as "chain count" here.
+            // This is what makes Black feel meaningfully different from a plain full-
+            // AOE pulse: at max level it's hunting down and detonating on three
+            // separate clusters per attack instead of one.
+            if (shape.Color == ShapeColor.Black)
+            {
+                var alreadyHit = new HashSet<Enemy>(hitEnemies);
+                int chainCount = shape.GetExtraBeamCount();
+                float falloff = 1f;
+
+                for (int chain = 0; chain < chainCount; chain++)
+                {
+                    Enemy nextTarget = FindPriorityEnemyInRange(shape, enemyManager, halfWidth, halfHeight, canGround, canElevated, prioritizeElevated, alreadyHit);
+                    if (nextTarget == null) break;
+
+                    falloff *= ChainBlastDamageFalloff;
+                    var (chainRow, chainCol) = enemyManager.GetInterpolatedPosition(nextTarget);
+                    var chainHits = FindEnemiesInBlast(enemyManager, chainRow, chainCol, blastRadius, canGround, canElevated);
+                    ApplySquareEffect(shape, chainHits, falloff);
+                    FireBombEffect(shape, chainRow, chainCol, blastRadius);
+                    alreadyHit.UnionWith(chainHits);
+                }
+            }
+
+            shape.AttackCooldownRemaining = shape.GetCurrentAttackInterval();
+        }
+
+        private List<Enemy> FindEnemiesInBlast(EnemyManager enemyManager, float centerRow, float centerCol, float radius, bool canGround, bool canElevated)
+        {
+            var hits = new List<Enemy>();
+
+            foreach (var enemy in enemyManager.ActiveEnemies)
+            {
+                bool elevated = enemy.IsElevated;
+                if (elevated && !canElevated) continue;
+                if (!elevated && !canGround) continue;
+
+                var (er, ec) = enemyManager.GetInterpolatedPosition(enemy);
+                float dr = er - centerRow;
+                float dc = ec - centerCol;
+                if (dr * dr + dc * dc <= radius * radius)
+                {
+                    hits.Add(enemy);
+                }
+            }
+
+            return hits;
+        }
+
+        private void FireBombEffect(PlacedShape shape, float row, float col, float radius)
+        {
+            ActiveBombEffects.Add(new BombEffect
+            {
+                Row = row,
+                Col = col,
+                Radius = radius,
+                Age = 0f,
+                Duration = BombEffectDurationSeconds,
+                Color = shape.Color
+            });
+        }
+
+        // damageFalloff lets Black's chained follow-up blasts (see TryFireSquare) hit
+        // for progressively less than the main blast, instead of every hop in the
+        // chain dealing full damage.
+        private void ApplySquareEffect(PlacedShape shape, List<Enemy> targets, float damageFalloff = 1f)
+        {
+            if (targets.Count == 0) return;
+            float damage = shape.GetCurrentDamage() * damageFalloff;
+
+            switch (shape.Color)
+            {
+                case ShapeColor.Black:
+                    {
+                        float slowStrength = shape.GetSpecialValue1();
+                        float slowDuration = shape.GetSpecialValue2();
+                        foreach (var enemy in targets)
+                        {
+                            enemy.TakeDamage(damage);
+                            enemy.ApplySlow(slowStrength, slowDuration);
+                        }
+                        break;
+                    }
+                case ShapeColor.Red:
+                    foreach (var enemy in targets) enemy.TakeDamage(damage);
+                    break;
+                case ShapeColor.Purple:
+                    {
+                        float stunDuration = shape.GetSpecialValue1();
+                        foreach (var enemy in targets)
+                        {
+                            enemy.TakeDamage(damage);
+                            enemy.ApplyStun(stunDuration);
+                        }
+                        break;
+                    }
+                case ShapeColor.Cyan:
+                    {
+                        float knockbackTiles = shape.GetSpecialValue1();
+                        foreach (var enemy in targets)
+                        {
+                            enemy.TakeDamage(damage);
+                            enemy.ApplyKnockback(knockbackTiles);
+                        }
+                        break;
+                    }
+                case ShapeColor.Green:
+                    {
+                        float poisonDps = shape.GetSpecialValue1();
+                        float poisonDuration = shape.GetSpecialValue2();
+                        foreach (var enemy in targets)
+                        {
+                            enemy.ApplyPoison(poisonDps, poisonDuration);
+                        }
+                        break;
+                    }
+                case ShapeColor.Blue:
+                    foreach (var enemy in targets) enemy.TakeDamage(damage);
+                    break;
+                case ShapeColor.Yellow:
+                    foreach (var enemy in targets) enemy.TakeDamage(damage);
+                    break;
+            }
+        }
+
+        // Square White: "overcharge bomb" -- deliberately a different flavor of buff
+        // than Triangle White's steady attack-speed pulse. Every ally caught in range
+        // gets an instant free shot (cooldown zeroed right now) PLUS a flat damage
+        // buff for a few seconds, instead of a continuous fire-rate multiplier.
+        private bool OverchargeAndBuffAlliesInRange(PlacedShape source, List<PlacedShape> placedShapes, float halfWidth, float halfHeight)
+        {
+            float towerRow = source.Row + 0.5f;
+            float towerCol = source.Col + 0.5f;
+            bool buffedAny = false;
+
+            // Same SpecialValue = duration / SpecialValue2 = multiplier convention as
+            // Triangle White (see TowerUpgradeConfig's Square White ladder comment) --
+            // GetCurrentAttackInterval derives this tower's own cooldown from
+            // SpecialValue too, so the two can't drift apart.
+            float damageBuffDuration = source.GetSpecialValue1();
+            float damageBuffMultiplier = source.GetSpecialValue2();
+
+            foreach (var ally in placedShapes)
+            {
+                if (ReferenceEquals(ally, source) || ally.Type == ShapeType.Line) continue;
+
+                float dr = ally.Row + 0.5f - towerRow;
+                float dc = ally.Col + 0.5f - towerCol;
+
+                if (!IsInRectRange(dr, dc, halfWidth, halfHeight)) continue;
+
+                ally.AttackCooldownRemaining = 0f;
+                ally.ApplyAttackDamageBuff(damageBuffMultiplier, damageBuffDuration);
+                buffedAny = true;
+            }
+
+            return buffedAny;
+        }
+
+        private List<Enemy> FindEnemiesAlongLineToward(PlacedShape shape, EnemyManager enemyManager, Enemy target,
+            float halfWidth, float halfHeight, bool canGround, bool canElevated)
+        {
+            float towerRow = shape.Row + 0.5f;
+            float towerCol = shape.Col + 0.5f;
+
+            var hits = new List<Enemy> { target };
+
+            var (targetRow, targetCol) = enemyManager.GetInterpolatedPosition(target);
+            float dirRow = targetRow - towerRow;
+            float dirCol = targetCol - towerCol;
+            float length = (float)Math.Sqrt(dirRow * dirRow + dirCol * dirCol);
+
+            if (length < 0.0001f) return hits;
+
+            dirRow /= length;
+            dirCol /= length;
+            float perpRow = -dirCol;
+            float perpCol = dirRow;
+            float corridorHalfWidth = GetBaseCorridorHalfWidth(shape.Color) + shape.GetCorridorWidthBonus();
+
+            foreach (var enemy in enemyManager.ActiveEnemies)
+            {
+                if (ReferenceEquals(enemy, target)) continue;
+
+                bool elevated = enemy.IsElevated;
+                if (elevated && !canElevated) continue;
+                if (!elevated && !canGround) continue;
+
+                var (er, ec) = enemyManager.GetInterpolatedPosition(enemy);
+                float dr = er - towerRow;
+                float dc = ec - towerCol;
+
+                if (!IsInRectRange(dr, dc, halfWidth, halfHeight)) continue;
+
+                float forward = dr * dirRow + dc * dirCol;
+                if (forward < 0f) continue;
+
+                float lateral = dr * perpRow + dc * perpCol;
+                if (Math.Abs(lateral) > corridorHalfWidth) continue;
+
+                hits.Add(enemy);
+            }
+
+            return hits;
+        }
+
+        public static bool IsInRectRange(float dr, float dc, float halfWidth, float halfHeight)
+        {
+            return Math.Abs(dc) <= halfWidth && Math.Abs(dr) <= halfHeight;
+        }
+    }
+}

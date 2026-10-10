@@ -1,0 +1,15 @@
+E:\gaming\TDGachaGame.pdb
+E:\gaming\Assets\Tiles\elevated.png
+E:\gaming\Assets\Tiles\entrance.png
+E:\gaming\Assets\Tiles\exit.png
+E:\gaming\Assets\Tiles\obstacle.png
+E:\gaming\Assets\Tiles\open.png
+E:\gaming\Assets\Tiles\path.png
+E:\gaming\music\Limbus Company - Rendezvous (Lunartique Mix).mp3
+E:\gaming\music\Limbus Company OST - Soleil.mp3
+E:\gaming\D3DCompiler_47_cor3.dll
+E:\gaming\PenImc_cor3.dll
+E:\gaming\PresentationNative_cor3.dll
+E:\gaming\vcruntime140_cor3.dll
+E:\gaming\wpfgfx_cor3.dll
+E:\gaming\TDGachaGame.exe

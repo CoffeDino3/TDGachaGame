@@ -1,0 +1,2348 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Windows.Forms;
+
+namespace TDGachaGame
+{
+    public partial class Form1 : Form
+    {
+        private System.Windows.Forms.Timer gameTimer;
+        private Panel gamePanel;
+
+        private FloorMap currentFloor;
+
+        private Image pathTexture;
+        private Image openTexture;
+        private Image obstacleTexture;
+        private Image elevatedTexture;
+        private Image entranceTexture;
+        private Image exitTexture;
+        private EnemyManager enemyManager;
+        private PlayerState playerState;
+        private readonly TowerManager towerManager = new TowerManager();
+        private const float TickDeltaSeconds = 0.033f;
+        private Rectangle earlyCallYesButton;
+        private Rectangle earlyCallNoButton;
+
+        private bool wasFloorCleared;
+        private bool isPaused;
+        private bool autoSkipWave;
+        private bool doubleSpeed;
+        private bool showSettingsPanel;
+        private bool showInventoryPanel;
+        private int selectedHotbarSlot = -1;
+        private int selectedRotation = 0;
+        private Point? hoveredMouseLocation;
+        private PlacedShape selectedPlacedShapeForRange;
+        private PlacedShape selectedShapeForUpgrade;
+        private Rectangle upgradePanelRect;
+        private Rectangle upgradePanelTitleBarRect;
+        private Rectangle upgradeButtonRect;
+        private Rectangle sellButtonRect;
+        private Rectangle targetFirstRect;
+        private Rectangle targetLastRect;
+        private Rectangle targetClosestRect;
+        private Rectangle targetFarthestRect;
+        private Rectangle targetLowestHpRect;
+        private Rectangle targetHighestHpRect;
+        private Rectangle closeUpgradePanelRect;
+        private const int UpgradePanelWidth = 280;
+        private const int UpgradePanelTitleBarHeight = 26;
+
+        // The panel spawns vertically centered on the left side (not top-left) the
+        // first time it's shown. After that this holds wherever the player dragged it
+        // to, and it stays there until the form closes — see
+        // GamePanel_MouseDown/MouseMove/MouseUp for the drag handling.
+        private Point? upgradePanelCustomPosition;
+        private bool isDraggingUpgradePanel;
+        private bool justFinishedDraggingUpgradePanel;
+        private Point upgradePanelDragMouseStart;
+        private Point upgradePanelDragOriginStart;
+
+        private const int HotbarSlotCount = 6;
+        private Rectangle[] hotbarSlotRects = new Rectangle[HotbarSlotCount];
+
+        // Slot 0 starts with the cheap Yellow Line; remaining slots are unassigned until the
+        // player puts something in them from the inventory panel. Mutable now, since
+        // assignment can change at runtime.
+        private UnitId?[] hotbarSlotUnits = new UnitId?[]
+        {
+            new UnitId(ShapeType.Line, ShapeColor.Yellow), null, null, null, null, null
+        };
+
+        private Rectangle inventoryButtonRect;
+        private Rectangle inventoryCloseButtonRect;
+        private UnitId? selectedInventoryUnit;
+        private (Rectangle Rect, UnitId Unit)[] inventoryOwnedSlots = Array.Empty<(Rectangle, UnitId)>();
+        private Rectangle[] inventoryLoadoutSlotRects = new Rectangle[HotbarSlotCount];
+
+        // Costs are placeholder numbers (design doc doesn't pin down exact gacha/shop
+        // pricing yet) — roughly following the stated rarity order, with Yellow cheap
+        // and spammable per the doc's note on it. Triangle is priced a tier above Line
+        // since it's an active attacking tower rather than a one-shot trap.
+        private static readonly Dictionary<UnitId, int> ShapeCosts = new Dictionary<UnitId, int>
+        {
+            { new UnitId(ShapeType.Line, ShapeColor.Black), 220 },
+            { new UnitId(ShapeType.Line, ShapeColor.White), 200 },
+            { new UnitId(ShapeType.Line, ShapeColor.Red), 160 },
+            { new UnitId(ShapeType.Line, ShapeColor.Purple), 140 },
+            { new UnitId(ShapeType.Line, ShapeColor.Cyan), 120 },
+            { new UnitId(ShapeType.Line, ShapeColor.Green), 100 },
+            { new UnitId(ShapeType.Line, ShapeColor.Blue), 80 },
+            { new UnitId(ShapeType.Line, ShapeColor.Yellow), 40 },
+            { new UnitId(ShapeType.Triangle, ShapeColor.Black), 350 },
+            { new UnitId(ShapeType.Triangle, ShapeColor.White), 320 },
+            { new UnitId(ShapeType.Triangle, ShapeColor.Red), 260 },
+            { new UnitId(ShapeType.Triangle, ShapeColor.Purple), 230 },
+            { new UnitId(ShapeType.Triangle, ShapeColor.Cyan), 200 },
+            { new UnitId(ShapeType.Triangle, ShapeColor.Green), 170 },
+            { new UnitId(ShapeType.Triangle, ShapeColor.Blue), 140 },
+            { new UnitId(ShapeType.Triangle, ShapeColor.Yellow), 70 }
+        };
+
+        private readonly List<PlacedShape> placedShapes = new List<PlacedShape>();
+        private Rectangle settingsButtonRect;
+        private Rectangle settingsCloseButtonRect;
+        private Rectangle pauseToggleRect;
+        private Rectangle autoSkipToggleRect;
+        private Rectangle doubleSpeedToggleRect;
+
+        private const int TopBarHeight = 40;
+        private const int BottomBarHeight = 74;
+        private int currentStage = 1;
+
+        public Form1()
+        {
+            InitializeComponent();
+            LoadTextures();
+            SetupGameWindow();
+        }
+        // One row of the upgrade panel's stat list: a label, the value at the currently
+        // active tier, and (if there's a next tier) the value it becomes plus whether
+        // that's an improvement. Building this list up front is what lets the panel's
+        // height and the targeting-grid position adjust to however many stat rows a
+        // given color actually has, instead of every color being forced into the same
+        // fixed layout.
+        private readonly struct UpgradeStatRow
+        {
+            public readonly string Label;
+            public readonly string CurrentText;
+            public readonly string NextText;
+            public readonly bool HasNext;
+            public readonly bool NextIsImprovement;
+
+            public UpgradeStatRow(string label, string currentText, string nextText, bool hasNext, bool nextIsImprovement)
+            {
+                Label = label;
+                CurrentText = currentText;
+                NextText = nextText;
+                HasNext = hasNext;
+                NextIsImprovement = nextIsImprovement;
+            }
+        }
+
+        private List<UpgradeStatRow> BuildUpgradeStatRows(PlacedShape shape, TowerUpgradeTier current, TowerUpgradeTier next)
+        {
+            var rows = new List<UpgradeStatRow>();
+
+            // Triangle towers show their detailed attack stats.
+            if (shape.Type == ShapeType.Triangle)
+            {
+                var (baseDamage, baseRange, baseInterval) = TowerUpgradeConfig.GetBaseStats(shape.Color);
+                bool hasDamage = baseDamage > 0f;
+
+                if (hasDamage)
+                {
+                    float activeDamageBuff = shape.AttackDamageBuffTimeRemaining > 0f ? shape.AttackDamageBuffMultiplier : 1f;
+                    float curDamage = baseDamage * current.DamageMultiplier * activeDamageBuff;
+                    float? nextDamage = next != null ? baseDamage * next.DamageMultiplier * activeDamageBuff : (float?)null;
+                    rows.Add(MakeRow("Damage", curDamage, nextDamage, "F1", ""));
+                }
+
+                float curRange = baseRange * current.RangeMultiplier;
+                float? nextRange = next != null ? baseRange * next.RangeMultiplier : (float?)null;
+                rows.Add(MakeRow("Range", curRange, nextRange, "F1", " tiles"));
+
+                if (shape.Color != ShapeColor.White)
+                {
+                    float curInterval = baseInterval * current.AttackIntervalMultiplier;
+                    if (shape.AttackSpeedBuffTimeRemaining > 0f) curInterval /= shape.AttackSpeedBuffMultiplier;
+                    float curAttacksPerSec = 1f / curInterval;
+                    float? nextAttacksPerSec = null;
+                    if (next != null)
+                    {
+                        float nextInterval = baseInterval * next.AttackIntervalMultiplier;
+                        if (shape.AttackSpeedBuffTimeRemaining > 0f) nextInterval /= shape.AttackSpeedBuffMultiplier;
+                        nextAttacksPerSec = 1f / nextInterval;
+                    }
+                    rows.Add(MakeRow("Attack Speed", curAttacksPerSec, nextAttacksPerSec, "F2", "/s"));
+                }
+
+                switch (shape.Color)
+                {
+                    case ShapeColor.Purple:
+                        rows.Add(MakeRow("Stun Duration", current.SpecialValue, next?.SpecialValue, "F2", "s"));
+                        break;
+                    case ShapeColor.Green:
+                        rows.Add(MakeRow("Poison DPS", current.SpecialValue, next?.SpecialValue, "F1", ""));
+                        rows.Add(MakeRow("Poison Duration", current.SpecialValue2, next?.SpecialValue2, "F1", "s"));
+                        break;
+                    case ShapeColor.Black:
+                        // Displayed as "how much slower", so a bigger number reads as a
+                        // stronger slow even though the underlying multiplier goes down.
+                        float curSlowPct = (1f - current.SpecialValue) * 100f;
+                        float? nextSlowPct = next != null ? (1f - next.SpecialValue) * 100f : (float?)null;
+                        rows.Add(MakeRow("Slow Strength", curSlowPct, nextSlowPct, "F0", "%"));
+                        rows.Add(MakeRow("Slow Duration", current.SpecialValue2, next?.SpecialValue2, "F1", "s"));
+                        break;
+                    case ShapeColor.White:
+                        rows.Add(MakeRow("Buff Duration", current.SpecialValue, next?.SpecialValue, "F1", "s"));
+                        float curCooldown = current.SpecialValue + TowerUpgradeConfig.WhiteCooldownBuffer;
+                        float? nextCooldown = next != null ? next.SpecialValue + TowerUpgradeConfig.WhiteCooldownBuffer : (float?)null;
+                        rows.Add(MakeRow("Cooldown", curCooldown, nextCooldown, "F1", "s"));
+                        rows.Add(MakeRow("Buff Speed x", current.SpecialValue2, next?.SpecialValue2, "F2", "x"));
+                        break;
+                }
+
+                if (current.CorridorWidthBonus > 0f || (next != null && next.CorridorWidthBonus > 0f))
+                {
+                    rows.Add(MakeRow("Beam Width +", current.CorridorWidthBonus, next?.CorridorWidthBonus, "F2", " tiles"));
+                }
+
+                if (current.DamageBuffMultiplier > 0f || (next != null && next.DamageBuffMultiplier > 0f))
+                {
+                    float curDmgBuffPct = DamageBuffPercent(current.DamageBuffMultiplier);
+                    float? nextDmgBuffPct = next != null ? DamageBuffPercent(next.DamageBuffMultiplier) : (float?)null;
+                    rows.Add(MakeRow("Ally Dmg Buff", curDmgBuffPct, nextDmgBuffPct, "F0", "%"));
+                }
+
+                return rows;
+            }
+
+            // Line traps: show trap-specific stats so the upgrade panel displays
+            // current -> next values for traps as well.
+            if (shape.Type == ShapeType.Line)
+            {
+                // Base flat damage used by some trap types
+                float baseFlat = EnemyManager.LineTrapFlatDamage;
+                float trapScale = EnemyManager.TrapEffectScale;
+
+                switch (shape.Color)
+                {
+                    case ShapeColor.White:
+                        rows.Add(MakeRow("Buff Duration", current.SpecialValue, next?.SpecialValue, "F1", "s"));
+                        rows.Add(MakeRow("Buff Speed x", current.SpecialValue2, next?.SpecialValue2, "F2", "x"));
+                        // Pulse radius (adjacent tiles baseline)
+                        float curRadius = Math.Max(1f, 1f * current.RangeMultiplier);
+                        float? nextRadius = next != null ? Math.Max(1f, 1f * next.RangeMultiplier) : (float?)null;
+                        rows.Add(MakeRow("Pulse Radius", curRadius, nextRadius, "F0", " tiles"));
+                        break;
+                    case ShapeColor.Red:
+                        float curBurnDps = current.SpecialValue > 0f ? current.SpecialValue : 12f;
+                        float? nextBurnDps = next != null ? (next.SpecialValue > 0f ? next.SpecialValue : 12f) : (float?)null;
+                        float curBurnDur = current.SpecialValue2 > 0f ? current.SpecialValue2 : 2f;
+                        float? nextBurnDur = next != null ? (next.SpecialValue2 > 0f ? next.SpecialValue2 : 2f) : (float?)null;
+                        rows.Add(MakeRow("Burn DPS", curBurnDps * trapScale, nextBurnDps.HasValue ? nextBurnDps.Value * trapScale : (float?)null, "F1", ""));
+                        rows.Add(MakeRow("Burn Duration", curBurnDur * trapScale, nextBurnDur.HasValue ? nextBurnDur.Value * trapScale : (float?)null, "F1", "s"));
+                        break;
+                    case ShapeColor.Purple:
+                        rows.Add(MakeRow("Stun Duration", current.SpecialValue, next?.SpecialValue, "F2", "s"));
+                        break;
+                    case ShapeColor.Cyan:
+                        rows.Add(MakeRow("Knockback", current.SpecialValue > 0f ? current.SpecialValue : 2.5f, next?.SpecialValue, "F1", " tiles"));
+                        break;
+                    case ShapeColor.Green:
+                        rows.Add(MakeRow("Poison DPS", current.SpecialValue, next?.SpecialValue, "F1", ""));
+                        rows.Add(MakeRow("Poison Duration", current.SpecialValue2, next?.SpecialValue2, "F1", "s"));
+                        break;
+                    case ShapeColor.Black:
+                        rows.Add(MakeRow("Trap Damage", baseFlat * current.DamageMultiplier * trapScale, next != null ? baseFlat * next.DamageMultiplier * trapScale : (float?)null, "F1", ""));
+                        float curSlowPctB = (1f - current.SpecialValue2) * 100f;
+                        float? nextSlowPctB = next != null ? (1f - next.SpecialValue2) * 100f : (float?)null;
+                        rows.Add(MakeRow("Slow Strength", curSlowPctB, nextSlowPctB, "F0", "%"));
+                        rows.Add(MakeRow("Slow Duration", current.SpecialValue, next?.SpecialValue, "F1", "s"));
+                        break;
+                    case ShapeColor.Yellow:
+                        rows.Add(MakeRow("Trap Damage", baseFlat * 0.4f * current.DamageMultiplier * trapScale, next != null ? baseFlat * 0.4f * next.DamageMultiplier * trapScale : (float?)null, "F1", ""));
+                        rows.Add(MakeRow("Slow Strength", (1f - current.SpecialValue) * 100f, next != null ? (1f - next.SpecialValue) * 100f : (float?)null, "F0", "%"));
+                        rows.Add(MakeRow("Slow Duration", current.SpecialValue2, next?.SpecialValue2, "F1", "s"));
+                        break;
+                    case ShapeColor.Blue:
+                        rows.Add(MakeRow("Grounded Duration", current.SpecialValue, next?.SpecialValue, "F1", "s"));
+                        break;
+                }
+
+                return rows;
+            }
+
+            return rows;
+        }
+
+        // A DamageBuffMultiplier of 0 means "no buff yet" rather than "-100%", so this
+        // keeps that case reading as a plain 0% instead of a nonsensical negative.
+        private static float DamageBuffPercent(float multiplier) => multiplier > 0f ? (multiplier - 1f) * 100f : 0f;
+
+        private static UpgradeStatRow MakeRow(string label, float current, float? next, string format, string suffix)
+        {
+            string currentText = current.ToString(format) + suffix;
+            if (!next.HasValue)
+            {
+                return new UpgradeStatRow(label, currentText, null, false, false);
+            }
+            float diff = next.Value - current;
+            string sign = diff >= 0 ? "+" : "";
+            string nextText = $"→ {next.Value.ToString(format)}{suffix} ({sign}{diff.ToString(format)})";
+            return new UpgradeStatRow(label, currentText, nextText, true, diff > 0f);
+        }
+
+        private void DrawUpgradePanel(Graphics g)
+        {
+            if (selectedShapeForUpgrade == null || !placedShapes.Contains(selectedShapeForUpgrade))
+            {
+                CloseUpgradePanel();
+                return;
+            }
+
+            var shape = selectedShapeForUpgrade;
+            int currentLevel = shape.UpgradeLevel;
+            var currentTier = TowerUpgradeConfig.GetTier(shape.Color, currentLevel);
+            var nextTier = TowerUpgradeConfig.GetNextTier(shape.Color, currentLevel);
+            bool isMaxLevel = nextTier == null;
+
+            // For triangles, collect every capstone perk the NEXT level would newly grant
+            // (extra beams, ally-damage buff unlocks). Traps don't get triangle-specific
+            // capstone messages.
+            var capstoneMessages = new List<string>();
+            if (shape.Type == ShapeType.Triangle && nextTier != null)
+            {
+                if (nextTier.ExtraBeamCount > currentTier.ExtraBeamCount)
+                {
+                    int totalBeamsNext = 1 + nextTier.ExtraBeamCount;
+                    string ordinal = totalBeamsNext switch { 2 => "second", 3 => "third", 4 => "fourth", _ => $"{totalBeamsNext}th" };
+                    capstoneMessages.Add($"Next level fires a {ordinal} beam!");
+                }
+                if (nextTier.DamageBuffMultiplier > currentTier.DamageBuffMultiplier)
+                {
+                    capstoneMessages.Add("Next level also buffs allies' damage!");
+                }
+            }
+
+            var statRows = BuildUpgradeStatRows(shape, currentTier, nextTier);
+
+            // Layout is top-anchored and grows with however many stat rows this color
+            // has, rather than every color being squeezed into one fixed panel size.
+            // Each stat row gets two full lines -- the current value, then (if there's
+            // a next tier) the "-> becomes X" line right under it in its own clear
+            // band, instead of the two being crammed on top of each other.
+            const int titleHeight = 30;
+            const int rowHeight = 36;
+            const int capstoneRowHeight = 20;
+            const int buttonHeight = 30;
+            const int targetLabelHeight = 20;
+            const int targetRowHeight = 22;
+            const int targetRowSpacing = 6;
+            int targetRows = 2; // 6 targeting modes at 3 columns
+            int capstoneHeight = capstoneMessages.Count * capstoneRowHeight;
+
+            int contentHeight = titleHeight
+                + statRows.Count * rowHeight
+                + capstoneHeight
+                + 10  // padding before buttons
+                + buttonHeight
+                + 14  // padding before targeting section
+                + targetLabelHeight
+                + targetRows * targetRowHeight + (targetRows - 1) * targetRowSpacing
+                + 16; // bottom padding
+
+            int panelHeight = Math.Max(contentHeight, 200);
+
+            if (upgradePanelCustomPosition == null)
+            {
+                int defaultX = 12;
+                int defaultY = TopBarHeight + Math.Max(12, (gamePanel.Height - TopBarHeight - BottomBarHeight - panelHeight) / 2);
+                upgradePanelCustomPosition = new Point(defaultX, defaultY);
+            }
+
+            var panelRect = new Rectangle(upgradePanelCustomPosition.Value.X, upgradePanelCustomPosition.Value.Y, UpgradePanelWidth, panelHeight);
+            upgradePanelRect = panelRect;
+            upgradePanelTitleBarRect = new Rectangle(panelRect.X, panelRect.Y, panelRect.Width, UpgradePanelTitleBarHeight);
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.CompositingMode = CompositingMode.SourceOver;
+
+            using (var bgBrush = new SolidBrush(Color.FromArgb(230, 30, 30, 30)))
+            using (var titleBarBrush = new SolidBrush(Color.FromArgb(230, 45, 45, 50)))
+            using (var borderPen = new Pen(Color.White, 1.5f))
+            {
+                g.FillRectangle(bgBrush, panelRect);
+                g.FillRectangle(titleBarBrush, upgradePanelTitleBarRect);
+                g.DrawRectangle(borderPen, panelRect);
+            }
+
+            using (var titleFont = new Font("Segoe UI", 11f, FontStyle.Bold))
+            using (var font = new Font("Segoe UI", 9f))
+            using (var textBrush = new SolidBrush(Color.White))
+            using (var dimBrush = new SolidBrush(Color.Gainsboro))
+            using (var goldBrush = new SolidBrush(Color.Gold))
+            using (var centerFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            using (var leftFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center })
+            {
+                int y = panelRect.Y + 4;
+
+                var titleRect = new RectangleF(panelRect.X + 12, y, panelRect.Width - 40, UpgradePanelTitleBarHeight - 4);
+                string title = isMaxLevel ? $"{shape.Color} {shape.Type} \u2605 MAX" : $"{shape.Color} {shape.Type} \u2605 Lv.{currentLevel + 1}/{TowerUpgradeConfig.GetTierCount(shape.Color)}";
+                g.DrawString(title, titleFont, isMaxLevel ? goldBrush : textBrush, titleRect, leftFormat);
+                y = panelRect.Y + titleHeight;
+
+                using (var nextValueFont = new Font("Segoe UI", 8.5f))
+                {
+                    int rowIndex = 0;
+                    foreach (var row in statRows)
+                    {
+                        if (rowIndex % 2 == 1)
+                        {
+                            var stripeRect = new RectangleF(panelRect.X + 4, y, panelRect.Width - 8, rowHeight - 2);
+                            using (var stripeBrush = new SolidBrush(Color.FromArgb(18, 255, 255, 255)))
+                            {
+                                g.FillRectangle(stripeBrush, stripeRect);
+                            }
+                        }
+
+                        var labelRect = new RectangleF(panelRect.X + 12, y + 2, 116, 18);
+                        var valueRect = new RectangleF(panelRect.X + 132, y + 2, panelRect.Width - 144, 18);
+                        g.DrawString(row.Label + ":", font, dimBrush, labelRect);
+                        g.DrawString(row.CurrentText, font, textBrush, valueRect);
+
+                        if (row.HasNext)
+                        {
+                            var nextRect = new RectangleF(panelRect.X + 12, y + 19, panelRect.Width - 24, 16);
+                            using (var nextBrush = new SolidBrush(row.NextIsImprovement ? Color.LightGreen : Color.Orange))
+                            {
+                                g.DrawString(row.NextText, nextValueFont, nextBrush, nextRect);
+                            }
+                        }
+                        y += rowHeight;
+                        rowIndex++;
+                    }
+                }
+
+                if (capstoneMessages.Count > 0)
+                {
+                    using (var capstoneBrush = new SolidBrush(Color.LightSkyBlue))
+                    using (var smallFont = new Font("Segoe UI", 8f, FontStyle.Italic))
+                    {
+                        foreach (var message in capstoneMessages)
+                        {
+                            var capstoneRect = new RectangleF(panelRect.X + 12, y, panelRect.Width - 24, capstoneRowHeight);
+                            g.DrawString(message, smallFont, capstoneBrush, capstoneRect);
+                            y += capstoneRowHeight;
+                        }
+                    }
+                }
+
+                y += 8;
+
+                int buttonWidth = 100;
+                int buttonY = y;
+
+                if (isMaxLevel)
+                {
+                    var maxRect = new Rectangle(panelRect.X + 12, buttonY, buttonWidth, buttonHeight);
+                    upgradeButtonRect = maxRect;
+                    using (var maxBrush = new SolidBrush(Color.FromArgb(100, 60, 60, 60)))
+                    {
+                        g.FillRectangle(maxBrush, maxRect);
+                        g.DrawString("MAX", font, goldBrush, maxRect, centerFormat);
+                    }
+                }
+                else
+                {
+                    upgradeButtonRect = new Rectangle(panelRect.X + 12, buttonY, buttonWidth, buttonHeight);
+                    bool canAfford = playerState != null && playerState.Cash >= nextTier.Cost;
+                    using (var upgradeBrush = new SolidBrush(canAfford ? Color.SteelBlue : Color.FromArgb(100, 60, 60, 60)))
+                    {
+                        g.FillRectangle(upgradeBrush, upgradeButtonRect);
+                        string label = canAfford ? $"Upgrade (${nextTier.Cost})" : $"Need ${nextTier.Cost}";
+                        g.DrawString(label, font, textBrush, upgradeButtonRect, centerFormat);
+                    }
+                }
+
+                int sellValue = TowerUpgradeConfig.GetSellValue(shape.Color, currentLevel);
+                sellButtonRect = new Rectangle(panelRect.Right - buttonWidth - 12, buttonY, buttonWidth, buttonHeight);
+                using (var sellBrush = new SolidBrush(Color.Firebrick))
+                {
+                    g.FillRectangle(sellBrush, sellButtonRect);
+                    g.DrawString($"Sell (${sellValue})", font, textBrush, sellButtonRect, centerFormat);
+                }
+
+                y = buttonY + buttonHeight + 14;
+
+                var targetLabelRect = new RectangleF(panelRect.X + 12, y, panelRect.Width - 24, 16);
+                g.DrawString("Targeting:", font, dimBrush, targetLabelRect, leftFormat);
+                y += targetLabelHeight;
+
+                var targetingModes = new (string label, TargetingMode mode)[]
+                {
+                    ("First", TargetingMode.First),
+                    ("Last", TargetingMode.Last),
+                    ("Closest", TargetingMode.Closest),
+                    ("Farthest", TargetingMode.Farthest),
+                    ("Low HP", TargetingMode.LowestHp),
+                    ("High HP", TargetingMode.HighestHp)
+                };
+
+                int btnWidth = 70;
+                int cols = 3;
+                int startX = panelRect.X + 12;
+
+                for (int i = 0; i < targetingModes.Length; i++)
+                {
+                    int col = i % cols;
+                    int row = i / cols;
+                    var rect = new Rectangle(startX + col * (btnWidth + targetRowSpacing), y + row * (targetRowHeight + targetRowSpacing), btnWidth, targetRowHeight);
+
+                    switch (targetingModes[i].mode)
+                    {
+                        case TargetingMode.First: targetFirstRect = rect; break;
+                        case TargetingMode.Last: targetLastRect = rect; break;
+                        case TargetingMode.Closest: targetClosestRect = rect; break;
+                        case TargetingMode.Farthest: targetFarthestRect = rect; break;
+                        case TargetingMode.LowestHp: targetLowestHpRect = rect; break;
+                        case TargetingMode.HighestHp: targetHighestHpRect = rect; break;
+                    }
+
+                    bool isSelected = shape.TargetingMode == targetingModes[i].mode;
+                    using (var btnBrush = new SolidBrush(isSelected ? Color.SteelBlue : Color.FromArgb(80, 60, 60, 60)))
+                    using (var btnPen = new Pen(isSelected ? Color.Gold : Color.Gray, 1f))
+                    {
+                        g.FillRectangle(btnBrush, rect);
+                        g.DrawRectangle(btnPen, rect);
+                        g.DrawString(targetingModes[i].label, font, textBrush, rect, centerFormat);
+                    }
+                }
+
+                closeUpgradePanelRect = new Rectangle(panelRect.Right - 26, panelRect.Y + 3, 20, 20);
+                using (var closeBrush = new SolidBrush(Color.FromArgb(150, 80, 80, 80)))
+                {
+                    g.FillRectangle(closeBrush, closeUpgradePanelRect);
+                    g.DrawString("\u2715", font, textBrush, closeUpgradePanelRect, centerFormat);
+                }
+            }
+
+            g.SmoothingMode = SmoothingMode.None;
+            g.CompositingMode = CompositingMode.SourceCopy;
+        }
+
+        private void LoadTextures()
+        {
+            string tilePath = @"E:\Visual\Game\TDGachaGame\Assets\Tiles";
+
+            pathTexture = LoadTexture(
+                Path.Combine(tilePath, "path.png")
+            );
+
+            openTexture = LoadTexture(
+                Path.Combine(tilePath, "open.png")
+            );
+
+            obstacleTexture = LoadTexture(
+                Path.Combine(tilePath, "obstacle.png")
+            );
+
+            elevatedTexture = LoadTexture(
+                Path.Combine(tilePath, "elevated.png")
+            );
+
+            entranceTexture = LoadTexture(
+                Path.Combine(tilePath, "entrance.png")
+            );
+
+            exitTexture = LoadTexture(
+                Path.Combine(tilePath, "exit.png")
+            );
+        }
+        private void TryUpgradeShape(PlacedShape shape)
+        {
+            if (shape == null || playerState == null) return;
+
+            var nextTier = TowerUpgradeConfig.GetNextTier(shape.Color, shape.UpgradeLevel);
+            if (nextTier == null) return;
+
+            if (!playerState.TrySpend(nextTier.Cost)) return;
+
+            shape.UpgradeLevel++;
+        }
+
+        private void TrySellShape(PlacedShape shape)
+        {
+            if (shape == null || playerState == null) return;
+
+            int sellValue = TowerUpgradeConfig.GetSellValue(shape.Color, shape.UpgradeLevel);
+            playerState.AddCash(sellValue);
+
+            placedShapes.Remove(shape);
+            CloseUpgradePanel();
+        }
+
+        // Closes the upgrade panel AND clears the range indicator together — clicking
+        // the ✕, clicking elsewhere on the map, or selling the unit should never leave
+        // one open without the other.
+        private void CloseUpgradePanel()
+        {
+            selectedShapeForUpgrade = null;
+            selectedPlacedShapeForRange = null;
+        }
+        private Image LoadTexture(string path)
+        {
+            if (!File.Exists(path))
+            {
+                MessageBox.Show(
+                    $"Could not find texture:\n{path}",
+                    "Missing Texture",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning
+                );
+
+                return null;
+            }
+
+            return Image.FromFile(path);
+        }
+
+        private void SetupGameWindow()
+        {
+            this.Text = "TD Gacha Game";
+            this.ClientSize = new Size(900, 700);
+
+            gamePanel = new DoubleBufferedPanel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Black
+            };
+
+            gamePanel.Paint += GamePanel_Paint;
+            gamePanel.MouseClick += GamePanel_MouseClick;
+            gamePanel.MouseMove += GamePanel_MouseMove;
+            gamePanel.MouseLeave += GamePanel_MouseLeave;
+            gamePanel.MouseDown += GamePanel_MouseDown;
+            gamePanel.MouseUp += GamePanel_MouseUp;
+
+            this.Controls.Add(gamePanel);
+
+            this.KeyPreview = true;
+            this.KeyDown += Form1_KeyDown;
+
+            gameTimer = new System.Windows.Forms.Timer();
+            gameTimer.Interval = 33;
+            gameTimer.Tick += GameTimer_Tick;
+            gameTimer.Start();
+
+            currentFloor = FloorMap.Generate(currentStage);
+            var (tier, waves) = FloorEnemyGenerator.Generate(currentStage);
+            enemyManager = new EnemyManager(currentFloor, waves);
+            playerState = new PlayerState(5000);
+        }
+
+        private void GameTimer_Tick(object sender, EventArgs e)
+        {
+            if (!isPaused)
+            {
+                float delta = TickDeltaSeconds * (doubleSpeed ? 2f : 1f);
+                enemyManager?.Update(delta);
+                enemyManager?.ApplyLineTrapDamage(placedShapes);
+                towerManager.Update(placedShapes, enemyManager, delta);
+
+                int cashReward = enemyManager?.ConsumeCashReward() ?? 0;
+                if (cashReward > 0)
+                {
+                    playerState?.AddCash(cashReward);
+                }
+
+                if (autoSkipWave && (enemyManager?.AwaitingEarlyWaveCall ?? false))
+                {
+                    enemyManager.ConfirmEarlyWaveCall();
+                }
+
+                bool floorClearedNow = enemyManager?.FloorCleared ?? false;
+
+                if (floorClearedNow && !wasFloorCleared)
+                {
+                    // TODO: hook this into actually advancing to the next floor.
+                    playerState.AddCash(20 + currentStage * 5);
+                }
+
+                wasFloorCleared = floorClearedNow;
+            }
+
+            gamePanel.Invalidate();
+        }
+        private (int tileSize, int offsetX, int offsetY) ComputeGridMetrics()
+        {
+            int availableWidth = gamePanel.ClientSize.Width;
+            int availableHeight = gamePanel.ClientSize.Height - TopBarHeight - BottomBarHeight;
+
+            int tileWidth = availableWidth / currentFloor.Cols;
+            int tileHeight = availableHeight / currentFloor.Rows;
+            int tileSize = Math.Min(tileWidth, tileHeight);
+
+            int gridPixelWidth = tileSize * currentFloor.Cols;
+            int gridPixelHeight = tileSize * currentFloor.Rows;
+
+            int offsetX = (availableWidth - gridPixelWidth) / 2;
+            int offsetY = TopBarHeight + (availableHeight - gridPixelHeight) / 2;
+
+            return (tileSize, offsetX, offsetY);
+        }
+
+        private void GamePanel_Paint(object sender, PaintEventArgs e)
+        {
+            var g = e.Graphics;
+
+            if (currentFloor == null)
+            {
+                return;
+            }
+
+            g.SmoothingMode = SmoothingMode.None;
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            g.CompositingMode = CompositingMode.SourceCopy;
+
+            var (tileSize, offsetX, offsetY) = ComputeGridMetrics();
+
+            for (int r = 0; r < currentFloor.Rows; r++)
+            {
+                for (int c = 0; c < currentFloor.Cols; c++)
+                {
+                    var tile = currentFloor.Tiles[r, c];
+                    Image texture = GetTexture(tile.Type);
+
+                    if (texture == null)
+                    {
+                        g.FillRectangle(Brushes.Magenta, offsetX + c * tileSize, offsetY + r * tileSize, tileSize, tileSize);
+                        continue;
+                    }
+
+                    Rectangle destination = new Rectangle(offsetX + c * tileSize, offsetY + r * tileSize, tileSize, tileSize);
+                    g.DrawImage(texture, destination);
+                }
+            }
+
+            DrawSelectedRange(g, tileSize, offsetX, offsetY);
+            DrawPlacedShapes(g, tileSize, offsetX, offsetY);
+            DrawEnemies(g, tileSize, offsetX, offsetY);
+            DrawShotEffects(g, tileSize, offsetX, offsetY);
+            DrawPlacementPreview(g, tileSize, offsetX, offsetY);
+            DrawHud(g);
+            DrawBottomBar(g);
+            DrawSettingsButton(g);
+            DrawInventoryButton(g);
+
+            if (showSettingsPanel)
+            {
+                DrawSettingsPanel(g);
+            }
+            else if (showInventoryPanel)
+            {
+                DrawInventoryPanel(g);
+            }
+            if (selectedShapeForUpgrade != null)
+            {
+                DrawUpgradePanel(g);
+            }
+            else if (isPaused)
+            {
+                DrawPausedBanner(g);
+            }
+
+        }
+
+        private void DrawHud(Graphics g)
+        {
+            if (enemyManager == null)
+            {
+                return;
+            }
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.CompositingMode = CompositingMode.SourceOver;
+
+            int barHeight = TopBarHeight;
+            int panelWidth = gamePanel.ClientSize.Width;
+            int gearReserve = 40; // keeps the right-aligned text clear of the settings button
+
+            using (var barBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+            {
+                g.FillRectangle(barBrush, 0, 0, panelWidth, barHeight);
+            }
+
+            using (var font = new Font("Segoe UI", 12f, FontStyle.Bold))
+            using (var textBrush = new SolidBrush(Color.White))
+            using (var leftFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center })
+            using (var centerFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            using (var rightFormat = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center })
+            {
+                var barRect = new RectangleF(0, 0, panelWidth, barHeight);
+                var rightTextRect = new RectangleF(0, 0, panelWidth - gearReserve, barHeight);
+
+                string timeText = FormatTime(enemyManager.ElapsedSeconds);
+                if (doubleSpeed)
+                {
+                    timeText += " (2x)";
+                }
+                g.DrawString(timeText, font, textBrush, Indent(barRect, 12), leftFormat);
+
+                string waveText = enemyManager.IsBetweenWaves
+                    ? $"Wave {enemyManager.CurrentWaveNumber} / {enemyManager.TotalWaves} — next in {Math.Ceiling(enemyManager.TimeUntilNextWave)}s"
+                    : $"Wave {enemyManager.CurrentWaveNumber} / {enemyManager.TotalWaves}";
+                if (autoSkipWave)
+                {
+                    waveText += " [auto]";
+                }
+                g.DrawString(waveText, font, textBrush, barRect, centerFormat);
+
+                string healthText = $"Base HP: {Math.Max(0, enemyManager.BaseHealth)}";
+                Color healthColor = enemyManager.BaseHealth <= 5 ? Color.OrangeRed : Color.White;
+                using (var healthBrush = new SolidBrush(healthColor))
+                {
+                    g.DrawString(healthText, font, healthBrush, Indent(rightTextRect, -12), rightFormat);
+                }
+            }
+
+            DrawEarlyWaveCallPrompt(g, barHeight, panelWidth);
+
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        private void DrawEarlyWaveCallPrompt(Graphics g, int barHeight, int panelWidth)
+        {
+            if (!enemyManager.AwaitingEarlyWaveCall)
+            {
+                earlyCallYesButton = Rectangle.Empty;
+                earlyCallNoButton = Rectangle.Empty;
+                return;
+            }
+
+            int promptWidth = 360;
+            int promptHeight = 60;
+            int promptX = (panelWidth - promptWidth) / 2;
+            int promptY = barHeight + 12;
+            var promptRect = new Rectangle(promptX, promptY, promptWidth, promptHeight);
+
+            using (var bgBrush = new SolidBrush(Color.FromArgb(210, 20, 20, 20)))
+            using (var borderPen = new Pen(Color.White, 1.5f))
+            {
+                g.FillRectangle(bgBrush, promptRect);
+                g.DrawRectangle(borderPen, promptRect);
+            }
+
+            using (var font = new Font("Segoe UI", 10f, FontStyle.Bold))
+            using (var textBrush = new SolidBrush(Color.White))
+            using (var centerFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            {
+                var messageRect = new RectangleF(promptRect.X + 8, promptRect.Y + 6, promptRect.Width - 16, 22);
+                g.DrawString($"Call wave {enemyManager.CurrentWaveNumber + 1} early? (Y/N)", font, textBrush, messageRect, centerFormat);
+
+                int buttonWidth = 70;
+                int buttonHeight = 24;
+                int buttonY = promptRect.Bottom - buttonHeight - 6;
+
+                earlyCallYesButton = new Rectangle(promptRect.X + promptRect.Width / 2 - buttonWidth - 8, buttonY, buttonWidth, buttonHeight);
+                earlyCallNoButton = new Rectangle(promptRect.X + promptRect.Width / 2 + 8, buttonY, buttonWidth, buttonHeight);
+
+                DrawPromptButton(g, font, centerFormat, earlyCallYesButton, "Yes", Color.SeaGreen);
+                DrawPromptButton(g, font, centerFormat, earlyCallNoButton, "No", Color.Firebrick);
+            }
+        }
+
+        private void DrawPromptButton(Graphics g, Font font, StringFormat format, Rectangle rect, string label, Color fillColor)
+        {
+            using (var brush = new SolidBrush(fillColor))
+            using (var textBrush = new SolidBrush(Color.White))
+            {
+                g.FillRectangle(brush, rect);
+                g.DrawString(label, font, textBrush, rect, format);
+            }
+        }
+
+        private void DrawBottomBar(Graphics g)
+        {
+            if (playerState == null)
+            {
+                return;
+            }
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.CompositingMode = CompositingMode.SourceOver;
+
+            int panelWidth = gamePanel.ClientSize.Width;
+            int panelHeight = gamePanel.ClientSize.Height;
+            int barY = panelHeight - BottomBarHeight;
+
+            using (var barBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+            {
+                g.FillRectangle(barBrush, 0, barY, panelWidth, BottomBarHeight);
+            }
+
+            using (var font = new Font("Segoe UI", 11f, FontStyle.Bold))
+            using (var textBrush = new SolidBrush(Color.Gold))
+            using (var leftFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center })
+            {
+                var cashRect = new RectangleF(12, barY, 150, BottomBarHeight);
+                g.DrawString($"Cash: {playerState.Cash}", font, textBrush, cashRect, leftFormat);
+            }
+
+            DrawHotbarSlots(g, barY);
+
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        private void DrawHotbarSlots(Graphics g, int barY)
+        {
+            int panelWidth = gamePanel.ClientSize.Width;
+
+            const int slotSize = 52;
+            const int slotGap = 8;
+            int totalWidth = HotbarSlotCount * slotSize + (HotbarSlotCount - 1) * slotGap;
+            int startX = (panelWidth - totalWidth) / 2;
+            int slotY = barY + (BottomBarHeight - slotSize) / 2;
+
+            using (var emptyBrush = new SolidBrush(Color.FromArgb(90, 255, 255, 255)))
+            using (var emptyPen = new Pen(Color.Gainsboro, 1.5f))
+            using (var selectedPen = new Pen(Color.Gold, 2.5f))
+            using (var font = new Font("Segoe UI", 9f))
+            using (var textBrush = new SolidBrush(Color.White))
+            using (var centerFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            {
+                for (int i = 0; i < HotbarSlotCount; i++)
+                {
+                    var rect = new Rectangle(startX + i * (slotSize + slotGap), slotY, slotSize, slotSize);
+                    hotbarSlotRects[i] = rect;
+                    g.FillRectangle(emptyBrush, rect);
+                    g.DrawRectangle(i == selectedHotbarSlot ? selectedPen : emptyPen, rect);
+
+                    UnitId? slotUnit = hotbarSlotUnits[i];
+                    if (slotUnit.HasValue)
+                    {
+                        var iconRect = new Rectangle(rect.X, rect.Y + 4, rect.Width, rect.Height - 18);
+                        DrawShapeGlyph(g, slotUnit.Value.Type, slotUnit.Value.Color, iconRect, 0, 255);
+
+                        var costRect = new Rectangle(rect.X, rect.Bottom - 16, rect.Width, 14);
+                        string costText = ShapeCosts.TryGetValue(slotUnit.Value, out int slotCost) ? $"${slotCost}" : "?";
+                        g.DrawString(costText, font, textBrush, costRect, centerFormat);
+                    }
+                    else
+                    {
+                        g.DrawString((i + 1).ToString(), font, textBrush, rect, centerFormat);
+                    }
+                }
+            }
+        }
+
+        private float IconScaleFactor()
+        {
+            // 900x700 is the window's starting size — the baseline the icon sizes below
+            // were designed at. Icons grow with the window but never shrink past that,
+            // and growth is capped so they don't get absurd on a huge monitor.
+            int panelWidth = gamePanel.ClientSize.Width;
+            int panelHeight = gamePanel.ClientSize.Height;
+            float scale = Math.Min(panelWidth / 900f, panelHeight / 700f);
+            return Math.Max(1f, Math.Min(2f, scale));
+        }
+
+        private void DrawSettingsButton(Graphics g)
+        {
+            int panelWidth = gamePanel.ClientSize.Width;
+            float scale = IconScaleFactor();
+            int size = (int)Math.Round(28 * scale);
+            int margin = (int)Math.Round(6 * scale);
+
+            // Clamped so the button never fully leaves the top bar, even at max scale.
+            int y = Math.Max(2, (TopBarHeight - size) / 2);
+            settingsButtonRect = new Rectangle(panelWidth - size - margin, y, size, size);
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            using (var brush = new SolidBrush(Color.FromArgb(180, 60, 60, 60)))
+            using (var pen = new Pen(Color.White, 1.2f))
+            using (var font = new Font("Segoe UI", 13f * scale))
+            using (var textBrush = new SolidBrush(Color.White))
+            using (var centerFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            {
+                var glyphRect = new Rectangle(
+                    settingsButtonRect.X + 1,
+                    settingsButtonRect.Y - 1,
+                    settingsButtonRect.Width,
+                    settingsButtonRect.Height
+                    );
+                g.DrawString("\u2699", font, textBrush, glyphRect, centerFormat);
+            }
+
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        private void DrawSettingsPanel(Graphics g)
+        {
+            int panelWidth = gamePanel.ClientSize.Width;
+            int panelHeight = gamePanel.ClientSize.Height;
+
+            const int width = 260;
+            const int height = 220;
+            var panelRect = new Rectangle((panelWidth - width) / 2, (panelHeight - height) / 2, width, height);
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            using (var dimBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+            {
+                g.FillRectangle(dimBrush, 0, 0, panelWidth, panelHeight);
+            }
+
+            using (var bgBrush = new SolidBrush(Color.FromArgb(230, 30, 30, 30)))
+            using (var borderPen = new Pen(Color.White, 1.5f))
+            {
+                g.FillRectangle(bgBrush, panelRect);
+                g.DrawRectangle(borderPen, panelRect);
+            }
+
+            using (var titleFont = new Font("Segoe UI", 12f, FontStyle.Bold))
+            using (var font = new Font("Segoe UI", 10f))
+            using (var textBrush = new SolidBrush(Color.White))
+            using (var centerFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            using (var leftFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center })
+            {
+                var titleRect = new RectangleF(panelRect.X, panelRect.Y + 8, panelRect.Width, 24);
+                g.DrawString("Settings", titleFont, textBrush, titleRect, centerFormat);
+
+                int rowY = panelRect.Y + 44;
+                const int rowSpacing = 34;
+
+                pauseToggleRect = DrawSettingsToggleRow(g, font, textBrush, leftFormat, panelRect, rowY, "Pause game", isPaused);
+                rowY += rowSpacing;
+
+                autoSkipToggleRect = DrawSettingsToggleRow(g, font, textBrush, leftFormat, panelRect, rowY, "Auto-skip wave", autoSkipWave);
+                rowY += rowSpacing;
+
+                doubleSpeedToggleRect = DrawSettingsToggleRow(g, font, textBrush, leftFormat, panelRect, rowY, "2x speed", doubleSpeed);
+
+                settingsCloseButtonRect = new Rectangle(panelRect.X + (panelRect.Width - 80) / 2, panelRect.Bottom - 38, 80, 26);
+                using (var closeBrush = new SolidBrush(Color.Firebrick))
+                {
+                    g.FillRectangle(closeBrush, settingsCloseButtonRect);
+                    g.DrawString("Close", font, textBrush, settingsCloseButtonRect, centerFormat);
+                }
+            }
+
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        private Rectangle DrawSettingsToggleRow(Graphics g, Font font, Brush textBrush, StringFormat leftFormat, Rectangle panelRect, int rowY, string label, bool isChecked)
+        {
+            var toggleRect = new Rectangle(panelRect.X + 18, rowY, 18, 18);
+
+            using (var boxPen = new Pen(Color.White, 1.5f))
+            {
+                g.DrawRectangle(boxPen, toggleRect);
+
+                if (isChecked)
+                {
+                    using (var checkBrush = new SolidBrush(Color.Gold))
+                    {
+                        g.FillRectangle(checkBrush, toggleRect.X + 3, toggleRect.Y + 3, toggleRect.Width - 6, toggleRect.Height - 6);
+                    }
+                }
+            }
+
+            var labelRect = new RectangleF(toggleRect.Right + 8, toggleRect.Y - 2, panelRect.Width - 60, 22);
+            g.DrawString(label, font, textBrush, labelRect, leftFormat);
+
+            return toggleRect;
+        }
+
+        private void DrawInventoryButton(Graphics g)
+        {
+            int panelWidth = gamePanel.ClientSize.Width;
+            int panelHeight = gamePanel.ClientSize.Height;
+            float scale = IconScaleFactor();
+            int size = (int)Math.Round(36 * scale);
+            int margin = (int)Math.Round(10 * scale);
+
+            // Floats on the right edge, vertically centered on the game board.
+            inventoryButtonRect = new Rectangle(
+                panelWidth - size - margin,
+                (panelHeight - size) / 2,
+                size,
+                size
+            );
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            // Small translucent backing so a lone icon floating mid-screen still reads as a button.
+            using (var bgBrush = new SolidBrush(Color.FromArgb(150, 0, 0, 0)))
+            using (var borderPen = new Pen(Color.White, 1.2f))
+            {
+                g.FillRectangle(bgBrush, inventoryButtonRect);
+                g.DrawRectangle(borderPen, inventoryButtonRect);
+            }
+
+            // Drawn as a 2x2 grid of squares rather than a font glyph, so it renders
+            // the same regardless of what symbol fonts are installed.
+            int pad = 8;
+            int cell = (size - pad * 2 - 3) / 2;
+            int gx = inventoryButtonRect.X + pad;
+            int gy = inventoryButtonRect.Y + pad;
+
+            using (var pen = new Pen(Color.White, 1.3f))
+            {
+                g.DrawRectangle(pen, gx, gy, cell, cell);
+                g.DrawRectangle(pen, gx + cell + 3, gy, cell, cell);
+                g.DrawRectangle(pen, gx, gy + cell + 3, cell, cell);
+                g.DrawRectangle(pen, gx + cell + 3, gy + cell + 3, cell, cell);
+            }
+
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        private void DrawInventoryPanel(Graphics g)
+        {
+            if (playerState == null)
+            {
+                return;
+            }
+
+            int panelWidth = gamePanel.ClientSize.Width;
+            int panelHeight = gamePanel.ClientSize.Height;
+
+            const int width = 380;
+            const int slotSize = 52;
+            const int slotGap = 10;
+            const int columns = 4;
+
+            int ownedCount = 0;
+            foreach (var kvp in playerState.OwnedShapeCounts)
+            {
+                if (kvp.Value > 0)
+                {
+                    ownedCount++;
+                }
+            }
+
+            int ownedCols = Math.Max(1, Math.Min(columns, ownedCount));
+            int ownedRows = ownedCount == 0 ? 1 : (int)Math.Ceiling(ownedCount / (double)ownedCols);
+            int ownedGridHeight = ownedCount == 0 ? 24 : ownedRows * slotSize + (ownedRows - 1) * slotGap;
+
+            const int titleAreaHeight = 32;
+            const int labelHeight = 18;
+            const int sectionGap = 10;
+            const int loadoutGridHeight = 44;
+            const int closeAreaHeight = 46;
+            const int bottomPad = 12;
+
+            int height = titleAreaHeight + labelHeight + sectionGap + ownedGridHeight + sectionGap
+                + labelHeight + sectionGap + loadoutGridHeight + closeAreaHeight + bottomPad;
+
+            var panelRect = new Rectangle((panelWidth - width) / 2, (panelHeight - height) / 2, width, height);
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            using (var dimBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+            {
+                g.FillRectangle(dimBrush, 0, 0, panelWidth, panelHeight);
+            }
+
+            using (var bgBrush = new SolidBrush(Color.FromArgb(230, 30, 30, 30)))
+            using (var borderPen = new Pen(Color.White, 1.5f))
+            {
+                g.FillRectangle(bgBrush, panelRect);
+                g.DrawRectangle(borderPen, panelRect);
+            }
+
+            using (var titleFont = new Font("Segoe UI", 12f, FontStyle.Bold))
+            using (var labelFont = new Font("Segoe UI", 9f))
+            using (var textBrush = new SolidBrush(Color.White))
+            using (var dimTextBrush = new SolidBrush(Color.Gainsboro))
+            using (var centerFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            using (var leftFormat = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center })
+            {
+                int y = panelRect.Y + 8;
+                var titleRect = new RectangleF(panelRect.X, y, panelRect.Width, 24);
+                g.DrawString("Units", titleFont, textBrush, titleRect, centerFormat);
+                y += titleAreaHeight;
+
+                var ownedLabelRect = new RectangleF(panelRect.X + 16, y, panelRect.Width - 32, labelHeight);
+                g.DrawString("Owned — select one, then tap a slot", labelFont, dimTextBrush, ownedLabelRect, leftFormat);
+                y += labelHeight + sectionGap;
+
+                DrawInventoryOwnedRow(g, labelFont, textBrush, centerFormat, panelRect, y, ownedCols, slotSize, slotGap);
+                y += ownedGridHeight + sectionGap;
+
+                var loadoutLabelRect = new RectangleF(panelRect.X + 16, y, panelRect.Width - 32, labelHeight);
+                g.DrawString("Loadout (keys 1-6) — tap empty-handed to clear", labelFont, dimTextBrush, loadoutLabelRect, leftFormat);
+                y += labelHeight + sectionGap;
+
+                DrawInventoryLoadoutRow(g, labelFont, textBrush, centerFormat, panelRect, y);
+
+                inventoryCloseButtonRect = new Rectangle(panelRect.X + (panelRect.Width - 80) / 2, panelRect.Bottom - 38, 80, 26);
+                using (var closeBrush = new SolidBrush(Color.Firebrick))
+                {
+                    g.FillRectangle(closeBrush, inventoryCloseButtonRect);
+                    g.DrawString("Close", labelFont, textBrush, inventoryCloseButtonRect, centerFormat);
+                }
+            }
+
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        private void DrawInventoryOwnedRow(Graphics g, Font font, Brush textBrush, StringFormat centerFormat, Rectangle panelRect, int rowY, int columns, int slotSize, int slotGap)
+        {
+            var ownedUnits = new List<UnitId>();
+            foreach (var kvp in playerState.OwnedShapeCounts)
+            {
+                if (kvp.Value > 0)
+                {
+                    ownedUnits.Add(kvp.Key);
+                }
+            }
+
+            inventoryOwnedSlots = new (Rectangle, UnitId)[ownedUnits.Count];
+
+            if (ownedUnits.Count == 0)
+            {
+                var emptyRect = new RectangleF(panelRect.X + 16, rowY, panelRect.Width - 32, 20);
+                g.DrawString("No units yet — pull the gacha to get some.", font, textBrush, emptyRect, centerFormat);
+                return;
+            }
+
+            int rowWidth = columns * slotSize + (columns - 1) * slotGap;
+            int startX = panelRect.X + (panelRect.Width - rowWidth) / 2;
+
+            using (var emptyBrush = new SolidBrush(Color.FromArgb(90, 255, 255, 255)))
+            using (var emptyPen = new Pen(Color.Gainsboro, 1.5f))
+            using (var selectedPen = new Pen(Color.Gold, 2.5f))
+            {
+                for (int i = 0; i < ownedUnits.Count; i++)
+                {
+                    int col = i % columns;
+                    int row = i / columns;
+                    var rect = new Rectangle(startX + col * (slotSize + slotGap), rowY + row * (slotSize + slotGap), slotSize, slotSize);
+                    UnitId unit = ownedUnits[i];
+                    inventoryOwnedSlots[i] = (rect, unit);
+
+                    g.FillRectangle(emptyBrush, rect);
+                    g.DrawRectangle(selectedInventoryUnit == unit ? selectedPen : emptyPen, rect);
+
+                    var iconRect = new Rectangle(rect.X, rect.Y + 4, rect.Width, rect.Height - 18);
+                    DrawShapeGlyph(g, unit.Type, unit.Color, iconRect, 0, 255);
+
+                    var countRect = new Rectangle(rect.X, rect.Bottom - 16, rect.Width, 14);
+                    g.DrawString($"x{playerState.OwnedShapeCounts[unit]}", font, textBrush, countRect, centerFormat);
+                }
+            }
+        }
+
+        private void DrawInventoryLoadoutRow(Graphics g, Font font, Brush textBrush, StringFormat centerFormat, Rectangle panelRect, int rowY)
+        {
+            const int slotSize = 44;
+            const int slotGap = 8;
+            int totalWidth = HotbarSlotCount * slotSize + (HotbarSlotCount - 1) * slotGap;
+            int startX = panelRect.X + (panelRect.Width - totalWidth) / 2;
+
+            using (var emptyBrush = new SolidBrush(Color.FromArgb(90, 255, 255, 255)))
+            using (var emptyPen = new Pen(Color.Gainsboro, 1.5f))
+            using (var filledPen = new Pen(Color.Gold, 2f))
+            using (var smallFont = new Font(font.FontFamily, 7.5f))
+            {
+                for (int i = 0; i < HotbarSlotCount; i++)
+                {
+                    var rect = new Rectangle(startX + i * (slotSize + slotGap), rowY, slotSize, slotSize);
+                    inventoryLoadoutSlotRects[i] = rect;
+
+                    UnitId? slotUnit = hotbarSlotUnits[i];
+
+                    g.FillRectangle(emptyBrush, rect);
+                    g.DrawRectangle(slotUnit.HasValue ? filledPen : emptyPen, rect);
+
+                    if (slotUnit.HasValue)
+                    {
+                        var iconRect = new Rectangle(rect.X, rect.Y + 2, rect.Width, rect.Height - 14);
+                        DrawShapeGlyph(g, slotUnit.Value.Type, slotUnit.Value.Color, iconRect, 0, 255);
+                    }
+
+                    var numberRect = new Rectangle(rect.X, rect.Bottom - 14, rect.Width, 12);
+                    g.DrawString((i + 1).ToString(), smallFont, textBrush, numberRect, centerFormat);
+                }
+            }
+        }
+
+        private void DrawPausedBanner(Graphics g)
+        {
+            int panelWidth = gamePanel.ClientSize.Width;
+            int panelHeight = gamePanel.ClientSize.Height;
+
+            using (var font = new Font("Segoe UI", 20f, FontStyle.Bold))
+            using (var textBrush = new SolidBrush(Color.White))
+            using (var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            {
+                var rect = new RectangleF(0, panelHeight / 2f - 30, panelWidth, 60);
+                g.DrawString("PAUSED", font, textBrush, rect, format);
+            }
+        }
+
+        private static RectangleF Indent(RectangleF rect, float amount)
+        {
+            return new RectangleF(rect.X + amount, rect.Y, rect.Width, rect.Height);
+        }
+
+        private static string FormatTime(float totalSeconds)
+        {
+            int seconds = (int)totalSeconds;
+            int minutes = seconds / 60;
+            seconds %= 60;
+            return $"{minutes}:{seconds:D2}";
+        }
+
+        private void DrawPlacedShapes(Graphics g, int tileSize, int offsetX, int offsetY)
+        {
+            if (placedShapes.Count == 0)
+            {
+                return;
+            }
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            foreach (var shape in placedShapes)
+            {
+                Rectangle tileRect = new Rectangle(
+                    offsetX + shape.Col * tileSize,
+                    offsetY + shape.Row * tileSize,
+                    tileSize,
+                    tileSize
+                );
+
+                // Attack range doesn't depend on facing at all (it's a fixed square
+                // block — see TowerManager), but the glyph still cosmetically turns to
+                // track its priority target for Triangle.
+                float displayRotation = shape.Type == ShapeType.Triangle ? shape.FacingDegrees : shape.Rotation;
+                DrawShapeGlyph(g, shape.Type, shape.Color, tileRect, displayRotation, 255);
+
+                DrawCooldownOverlay(g, shape, tileRect, displayRotation);
+                DrawSpeedBuffBadge(g, shape, tileRect);
+                DrawDamageBuffBadge(g, shape, tileRect);
+            }
+
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        // A small lightning-bolt badge in the tile's top-right corner while an
+        // attack-speed buff (currently only White's) is active — the cooldown shroud
+        // sweeping faster is subtle on its own, so this gives buffed/not-buffed an
+        // unmistakable at-a-glance difference.
+        private void DrawSpeedBuffBadge(Graphics g, PlacedShape shape, Rectangle tileRect)
+        {
+            if (shape.AttackSpeedBuffTimeRemaining <= 0f)
+            {
+                return;
+            }
+
+            var previousCompositing = g.CompositingMode;
+            g.CompositingMode = CompositingMode.SourceOver;
+
+            int badgeSize = Math.Max(10, tileRect.Width / 3);
+            var badgeRect = new Rectangle(tileRect.Right - badgeSize - 1, tileRect.Y + 1, badgeSize, badgeSize);
+
+            using (var badgeBrush = new SolidBrush(Color.FromArgb(230, 60, 220, 90)))
+            using (var badgePen = new Pen(Color.FromArgb(230, 20, 90, 30), 1f))
+            {
+                g.FillEllipse(badgeBrush, badgeRect);
+                g.DrawEllipse(badgePen, badgeRect);
+            }
+
+            using (var boltFont = new Font("Segoe UI", badgeSize * 0.65f, FontStyle.Bold))
+            using (var boltBrush = new SolidBrush(Color.FromArgb(230, 20, 60, 20)))
+            using (var centerFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            {
+                g.DrawString("\u26A1", boltFont, boltBrush, badgeRect, centerFormat);
+            }
+
+            g.CompositingMode = previousCompositing;
+        }
+
+        // A small crossed-swords badge in the tile's top-LEFT corner (mirrors the
+        // speed badge, which sits top-right, so both can show at once without
+        // overlapping) while an attack-damage buff is active. Fires from either
+        // source that sets AttackDamageBuffTimeRemaining -- a maxed-out White
+        // Triangle's own pulse, or the White Line trap -- so both get the same
+        // at-a-glance tell the speed buff already had.
+        private void DrawDamageBuffBadge(Graphics g, PlacedShape shape, Rectangle tileRect)
+        {
+            if (shape.AttackDamageBuffTimeRemaining <= 0f)
+            {
+                return;
+            }
+
+            var previousCompositing = g.CompositingMode;
+            g.CompositingMode = CompositingMode.SourceOver;
+
+            int badgeSize = Math.Max(10, tileRect.Width / 3);
+            var badgeRect = new Rectangle(tileRect.X + 1, tileRect.Y + 1, badgeSize, badgeSize);
+
+            using (var badgeBrush = new SolidBrush(Color.FromArgb(230, 230, 110, 40)))
+            using (var badgePen = new Pen(Color.FromArgb(230, 100, 40, 10), 1f))
+            {
+                g.FillEllipse(badgeBrush, badgeRect);
+                g.DrawEllipse(badgePen, badgeRect);
+            }
+
+            using (var swordFont = new Font("Segoe UI", badgeSize * 0.55f, FontStyle.Bold))
+            using (var swordBrush = new SolidBrush(Color.FromArgb(230, 60, 25, 5)))
+            using (var centerFormat = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            {
+                g.DrawString("\u2694", swordFont, swordBrush, badgeRect, centerFormat);
+            }
+
+            g.CompositingMode = previousCompositing;
+        }
+
+        // A grayish shroud over the unit that shrinks away from the top down as its
+        // cooldown ticks toward zero — right after firing it covers the whole shape, and
+        // by the time it's ready to fire again the shape is fully clear. Anchored to the
+        // bottom (rather than shrinking from the bottom up) so the "reveal" reads as
+        // sweeping top-to-bottom. Clipped to the shape's own silhouette (rotated to
+        // match its current facing) rather than the full tile square, so it doesn't
+        // shade the empty corners around the glyph.
+        // A grayish shroud over the unit that shrinks away from the top down as its
+        // cooldown ticks toward zero — right after firing it covers the whole shape, and
+        // by the time it's ready to fire again the shape is fully clear. Anchored to the
+        // bottom (rather than shrinking from the bottom up) so the "reveal" reads as
+        // sweeping top-to-bottom. Clipped to the shape's own silhouette (rotated to
+        // match its current facing) rather than the full tile square, so it doesn't
+        // shade the empty corners around the glyph.
+        //
+        // This deliberately never touches g.Clip or g.Transform: it builds the
+        // silhouette as a plain data transform (GraphicsPath.Transform, not the
+        // Graphics object's transform) and intersects it with the overlay band as a
+        // standalone Region, then fills just that Region directly. Setting g.Clip and
+        // restoring it afterward looked fine per-call, but any mismatch between when a
+        // clip gets applied and when it gets restored leaves it stuck for every draw
+        // call after it for the rest of that frame — HUD included — which is exactly
+        // the "random overlay on the whole GUI" this was causing. Not worth the risk
+        // when a fully self-contained Region does the same job.
+        private void DrawCooldownOverlay(Graphics g, PlacedShape shape, Rectangle tileRect, float rotationDegrees)
+        {
+            if (shape.AttackCooldownRemaining <= 0f)
+            {
+                return;
+            }
+
+            // Uses the shape's actual current interval (upgrades + any active speed
+            // buff), not a fixed per-color number, so a faster tower visibly sweeps
+            // its cooldown shroud away faster too — otherwise an attack-speed upgrade
+            // or buff had no visible tell at all.
+            float interval = shape.GetCurrentAttackInterval();
+            if (interval <= 0f)
+            {
+                return;
+            }
+
+            float ratio = shape.AttackCooldownRemaining / interval;
+            ratio = Math.Max(0f, Math.Min(1f, ratio));
+            if (ratio <= 0f)
+            {
+                return;
+            }
+
+            using (var path = BuildShapeGlyphPath(shape.Type, tileRect))
+            {
+                if (path.PointCount == 0)
+                {
+                    return;
+                }
+
+                float centerX = tileRect.X + tileRect.Width / 2f;
+                float centerY = tileRect.Y + tileRect.Height / 2f;
+
+                using (var rotation = new Matrix())
+                {
+                    rotation.RotateAt(rotationDegrees, new PointF(centerX, centerY));
+                    path.Transform(rotation);
+                }
+
+                float overlayHeight = tileRect.Height * ratio;
+                var overlayRect = new RectangleF(tileRect.X, tileRect.Bottom - overlayHeight, tileRect.Width, overlayHeight);
+
+                using (var shapeRegion = new Region(path))
+                {
+                    shapeRegion.Intersect(overlayRect);
+
+                    var previousCompositing = g.CompositingMode;
+                    g.CompositingMode = CompositingMode.SourceOver;
+
+                    using (var overlayBrush = new SolidBrush(Color.FromArgb(150, 90, 90, 90)))
+                    {
+                        g.FillRegion(overlayBrush, shapeRegion);
+                    }
+
+                    g.CompositingMode = previousCompositing;
+                }
+            }
+        }
+
+        // Draws each in-flight attack as a straight, fading beam along its actual firing
+        // line (tower to the edge of its range), tinted to the tower's color — a "line
+        // AOE" flash rather than a projectile aimed at one point, matching how the hit
+        // detection itself works now (see TowerManager.FindEnemiesAlongLineToward).
+        private void DrawShotEffects(Graphics g, int tileSize, int offsetX, int offsetY)
+        {
+            if (towerManager.ActiveShotEffects.Count == 0)
+            {
+                return;
+            }
+
+            var previousCompositing = g.CompositingMode;
+            var previousSmoothing = g.SmoothingMode;
+            g.CompositingMode = CompositingMode.SourceOver;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            foreach (var effect in towerManager.ActiveShotEffects)
+            {
+                float progress = effect.Duration > 0f ? Math.Min(1f, effect.Age / effect.Duration) : 1f;
+                int alpha = (int)(220 * (1f - progress));
+                if (alpha <= 0)
+                {
+                    continue;
+                }
+
+                PointF from = new PointF(offsetX + effect.FromCol * tileSize, offsetY + effect.FromRow * tileSize);
+                PointF to = new PointF(offsetX + effect.ToCol * tileSize, offsetY + effect.ToRow * tileSize);
+
+                Color beamColor = GetShapeDisplayColor(effect.Color);
+
+                // Translucent corridor band, drawn UNDER the bright core line, at the
+                // beam's actual hit-corridor width -- this is what makes a wide-corridor
+                // color (Cyan, upgraded Green, maxed Black) visibly wider than a plain
+                // single-target beam instead of every color looking identical.
+                float corridorPixelHalfWidth = effect.CorridorHalfWidth * tileSize;
+                if (corridorPixelHalfWidth > 1f)
+                {
+                    float dx = to.X - from.X;
+                    float dy = to.Y - from.Y;
+                    float length = (float)Math.Sqrt(dx * dx + dy * dy);
+                    if (length > 0.0001f)
+                    {
+                        float perpX = -dy / length * corridorPixelHalfWidth;
+                        float perpY = dx / length * corridorPixelHalfWidth;
+
+                        PointF[] corridorQuad =
+                        {
+                            new PointF(from.X + perpX, from.Y + perpY),
+                            new PointF(to.X + perpX, to.Y + perpY),
+                            new PointF(to.X - perpX, to.Y - perpY),
+                            new PointF(from.X - perpX, from.Y - perpY)
+                        };
+
+                        int corridorAlpha = Math.Max(0, (int)(alpha * 0.35f));
+                        using (var corridorBrush = new SolidBrush(Color.FromArgb(corridorAlpha, beamColor)))
+                        {
+                            g.FillPolygon(corridorBrush, corridorQuad);
+                        }
+                    }
+                }
+
+                float beamWidth = Math.Max(2f, tileSize * 0.12f);
+
+                using (var beamPen = new Pen(Color.FromArgb(alpha, beamColor), beamWidth))
+                {
+                    beamPen.StartCap = LineCap.Round;
+                    beamPen.EndCap = LineCap.Round;
+                    g.DrawLine(beamPen, from, to);
+                }
+            }
+
+            g.SmoothingMode = previousSmoothing;
+            g.CompositingMode = previousCompositing;
+        }
+
+        // Highlights the currently-selected placed unit and, for types that have a
+        // known attack range (Triangle so far — other shapes aren't implemented yet),
+        // draws that range on the map: a cone for Triangle, following its live facing.
+        private void DrawSelectedRange(Graphics g, int tileSize, int offsetX, int offsetY)
+        {
+            if (selectedPlacedShapeForRange == null)
+            {
+                return;
+            }
+
+            if (!placedShapes.Contains(selectedPlacedShapeForRange))
+            {
+                selectedPlacedShapeForRange = null;
+                return;
+            }
+
+            var shape = selectedPlacedShapeForRange;
+            Rectangle tileRect = new Rectangle(
+                offsetX + shape.Col * tileSize,
+                offsetY + shape.Row * tileSize,
+                tileSize,
+                tileSize
+            );
+
+            // The main paint pass runs with CompositingMode.SourceCopy (for crisp
+            // nearest-neighbor tile blits), which writes pixels directly instead of
+            // alpha-blending them — any translucent color drawn under it renders wrong
+            // (it read as almost-black instead of a soft tint). Switch to SourceOver for
+            // this translucent overlay, then restore SourceCopy afterward so the rest of
+            // the paint pass is unaffected.
+            g.CompositingMode = CompositingMode.SourceOver;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            using (var highlightPen = new Pen(Color.FromArgb(150, Color.Gold), 2f))
+            {
+                g.DrawRectangle(highlightPen, tileRect);
+            }
+
+            if (shape.Type == ShapeType.Triangle)
+            {
+                DrawTriangleRangeRectangle(g, offsetX, offsetY, tileSize, shape.Row, shape.Col, shape.Color, shape.Rotation, shape.GetRangeMultiplier(), fillAlpha: 45, outlineAlpha: 150);
+            }
+            else if (shape.Type == ShapeType.Line && shape.Color == ShapeColor.White)
+            {
+                // White trap: show the adjacent-tile pulse area (3x3) and allow
+                // upgraded tiers to expand this slightly via the tier's RangeMultiplier.
+                var tier = TowerUpgradeConfig.GetTier(shape.Color, shape.UpgradeLevel);
+                int radius = Math.Max(1, (int)Math.Round(1f * tier.RangeMultiplier));
+
+                using (var fillBrush = new SolidBrush(Color.FromArgb(45, Color.Azure)))
+                using (var outlinePen = new Pen(Color.FromArgb(150, Color.Azure), 1.5f))
+                {
+                    for (int dr = -radius; dr <= radius; dr++)
+                    {
+                        for (int dc = -radius; dc <= radius; dc++)
+                        {
+                            int r = shape.Row + dr;
+                            int c = shape.Col + dc;
+                            if (r < 0 || c < 0 || r >= currentFloor.Rows || c >= currentFloor.Cols) continue;
+                            var rect = new Rectangle(offsetX + c * tileSize, offsetY + r * tileSize, tileSize, tileSize);
+                            g.FillRectangle(fillBrush, rect);
+                            g.DrawRectangle(outlinePen, rect);
+                        }
+                    }
+                }
+            }
+
+            g.SmoothingMode = SmoothingMode.None;
+            g.CompositingMode = CompositingMode.SourceCopy;
+        }
+
+        // Shared by the "selected placed unit" range overlay above and the placement
+        // hover preview below, so both always agree on exactly what area a Triangle can
+        // reach — oriented per the unit's current Rotation (see
+        // TowerManager.GetOrientedRangeExtents), since ranges are WxH rectangles now
+        // rather than uniform squares and actually change shape when turned sideways.
+        private void DrawTriangleRangeRectangle(Graphics g, int offsetX, int offsetY, int tileSize, int row, int col, ShapeColor color, int rotationDegrees, float rangeMultiplier, int fillAlpha, int outlineAlpha)
+        {
+            var (halfWidthTiles, halfHeightTiles) = TowerManager.GetOrientedRangeExtents(color, rotationDegrees, rangeMultiplier);
+            float towerCenterX = offsetX + (col + 0.5f) * tileSize;
+            float towerCenterY = offsetY + (row + 0.5f) * tileSize;
+            float halfWidthPixels = halfWidthTiles * tileSize;
+            float halfHeightPixels = halfHeightTiles * tileSize;
+
+            var rangeRect = new RectangleF(
+                towerCenterX - halfWidthPixels,
+                towerCenterY - halfHeightPixels,
+                halfWidthPixels * 2f,
+                halfHeightPixels * 2f
+            );
+
+            using (var fillBrush = new SolidBrush(Color.FromArgb(fillAlpha, Color.Gold)))
+            using (var outlinePen = new Pen(Color.FromArgb(outlineAlpha, Color.Gold), 1.5f))
+            {
+                g.FillRectangle(fillBrush, rangeRect);
+                g.DrawRectangle(outlinePen, rangeRect.X, rangeRect.Y, rangeRect.Width, rangeRect.Height);
+            }
+        }
+
+        private void DrawPlacementPreview(Graphics g, int tileSize, int offsetX, int offsetY)
+        {
+            if (selectedHotbarSlot == -1 || hoveredMouseLocation == null || currentFloor == null)
+            {
+                return;
+            }
+
+            UnitId? slotUnit = hotbarSlotUnits[selectedHotbarSlot];
+            if (slotUnit == null)
+            {
+                return;
+            }
+
+            Point mouse = hoveredMouseLocation.Value;
+            if (mouse.X < offsetX || mouse.Y < offsetY)
+            {
+                return;
+            }
+
+            int col = (mouse.X - offsetX) / tileSize;
+            int row = (mouse.Y - offsetY) / tileSize;
+
+            if (row < 0 || row >= currentFloor.Rows || col < 0 || col >= currentFloor.Cols)
+            {
+                return;
+            }
+
+            Rectangle tileRect = new Rectangle(
+                offsetX + col * tileSize,
+                offsetY + row * tileSize,
+                tileSize,
+                tileSize
+            );
+
+            if (slotUnit.Value.Type == ShapeType.Triangle)
+            {
+                // Faint preview of the range rectangle before the unit is even placed,
+                // oriented the same way the placed unit would be (selectedRotation is
+                // what actually gets baked into the PlacedShape on click) — see
+                // DrawTriangleRangeRectangle for why it has to be SourceOver.
+                var previousCompositing = g.CompositingMode;
+                g.CompositingMode = CompositingMode.SourceOver;
+                DrawTriangleRangeRectangle(g, offsetX, offsetY, tileSize, row, col, slotUnit.Value.Color, selectedRotation, rangeMultiplier: 1f, fillAlpha: 25, outlineAlpha: 90);
+                g.CompositingMode = previousCompositing;
+            }
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            DrawShapeGlyph(g, slotUnit.Value.Type, slotUnit.Value.Color, tileRect, selectedRotation, 110);
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        // Elevation-only placement: currently just Blue Triangle, the elevation sniper —
+        // it has to stand on an Elevated tile instead of open ground, which is the
+        // trade-off for being able to reach elevated enemies at all. Extend this list if
+        // future shapes get their own elevation-only Blue variant.
+        private static bool RequiresElevatedGround(UnitId unit)
+        {
+            return unit.Type == ShapeType.Triangle && unit.Color == ShapeColor.Blue;
+        }
+
+        // Fill color used to render each shape color. Kept separate from EnemyColor's
+        // palette since these are two unrelated concepts that just happen to share some
+        // color names.
+        private static Color GetShapeDisplayColor(ShapeColor color)
+        {
+            return color switch
+            {
+                ShapeColor.Black => Color.FromArgb(40, 40, 40),
+                ShapeColor.White => Color.White,
+                ShapeColor.Red => Color.Firebrick,
+                ShapeColor.Purple => Color.MediumPurple,
+                ShapeColor.Cyan => Color.Cyan,
+                ShapeColor.Green => Color.LimeGreen,
+                ShapeColor.Blue => Color.DodgerBlue,
+                ShapeColor.Yellow => Color.Gold,
+                _ => Color.Gainsboro
+            };
+        }
+
+        // Every shape gets a black border except Black shapes themselves, which use a
+        // light border instead since black-on-black would be invisible against the fill.
+        private static Color GetShapeOutlineColor(ShapeColor color)
+        {
+            return color == ShapeColor.Black ? Color.Gainsboro : Color.Black;
+        }
+
+        // Local (pre-rotation) outline for a shape's glyph — shared by DrawShapeGlyph
+        // (so the drawn icon and this stay in sync) and DrawCooldownOverlay (so the
+        // cooldown shroud clips to the actual silhouette instead of the whole tile).
+        private static GraphicsPath BuildShapeGlyphPath(ShapeType type, Rectangle tileRect)
+        {
+            var path = new GraphicsPath();
+
+            switch (type)
+            {
+                case ShapeType.Line:
+                    {
+                        int barHeight = Math.Max(3, tileRect.Height / 6);
+                        var barRect = new Rectangle(
+                            tileRect.X + 2,
+                            tileRect.Y + (tileRect.Height - barHeight) / 2,
+                            tileRect.Width - 4,
+                            barHeight
+                        );
+                        path.AddRectangle(barRect);
+                        break;
+                    }
+
+                case ShapeType.Triangle:
+                    {
+                        int pad = Math.Max(4, tileRect.Width / 8);
+                        var apex = new Point(tileRect.X + tileRect.Width / 2, tileRect.Y + pad);
+                        var baseLeft = new Point(tileRect.X + pad, tileRect.Bottom - pad);
+                        var baseRight = new Point(tileRect.Right - pad, tileRect.Bottom - pad);
+                        path.AddPolygon(new[] { apex, baseLeft, baseRight });
+                        break;
+                    }
+
+                default:
+                    // Other shapes aren't implemented yet.
+                    break;
+            }
+
+            return path;
+        }
+
+        private void DrawShapeGlyph(Graphics g, ShapeType type, ShapeColor color, Rectangle tileRect, float rotationDegrees, int alpha)
+        {
+            float centerX = tileRect.X + tileRect.Width / 2f;
+            float centerY = tileRect.Y + tileRect.Height / 2f;
+
+            using (var path = BuildShapeGlyphPath(type, tileRect))
+            {
+                if (path.PointCount > 0)
+                {
+                    // Rotates the path's own point data (not g.Transform) so this never
+                    // has to touch — and restore — the Graphics object's ambient
+                    // transform at all.
+                    using (var rotation = new Matrix())
+                    {
+                        rotation.RotateAt(rotationDegrees, new PointF(centerX, centerY));
+                        path.Transform(rotation);
+                    }
+
+                    Color fill = GetShapeDisplayColor(color);
+                    Color outline = GetShapeOutlineColor(color);
+                    float outlineWidth = type == ShapeType.Triangle ? 1.2f : 1f;
+
+                    using (var fillBrush = new SolidBrush(Color.FromArgb(alpha, fill)))
+                    using (var outlinePen = new Pen(Color.FromArgb(alpha, outline), outlineWidth))
+                    {
+                        g.FillPath(fillBrush, path);
+                        g.DrawPath(outlinePen, path);
+                    }
+                }
+            }
+        }
+
+
+        private void DrawEnemies(Graphics g, int tileSize, int offsetX, int offsetY)
+        {
+            if (enemyManager == null)
+            {
+                return;
+            }
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            foreach (var enemy in enemyManager.ActiveEnemies)
+            {
+                var (row, col) = enemyManager.GetInterpolatedPosition(enemy);
+
+                // GetInterpolatedPosition now already returns a tile-center position
+                // (see EnemyManager), so this only needs to scale into pixels — no more
+                // +0.5f here, or enemies would render half a tile off from where towers
+                // actually see and hit them.
+                float centerX = offsetX + col * tileSize;
+                float centerY = offsetY + row * tileSize;
+                float radius = tileSize * GetEnemyRadiusScale(enemy.Color);
+
+                DrawEnemyHealthCircle(g, enemy, centerX, centerY, radius);
+            }
+
+            g.SmoothingMode = SmoothingMode.None;
+        }
+
+        private void DrawEnemyHealthCircle(Graphics g, Enemy enemy, float centerX, float centerY, float radius)
+        {
+            float hpFraction = enemy.MaxHealth > 0f ? enemy.CurrentHealth / enemy.MaxHealth : 0f;
+            hpFraction = Math.Max(0f, Math.Min(1f, hpFraction));
+
+            float diameter = radius * 2f;
+            var boundingRect = new RectangleF(centerX - radius, centerY - radius, diameter, diameter);
+
+            // Missing health shows as a dim husk of the circle underneath the colored wedge.
+            using (var lostBrush = new SolidBrush(Color.FromArgb(90, 40, 40, 40)))
+            {
+                g.FillEllipse(lostBrush, boundingRect);
+            }
+
+            if (hpFraction > 0f)
+            {
+                float sweepAngle = 360f * hpFraction;
+                using (var brush = new SolidBrush(GetEnemyColor(enemy.Color)))
+                {
+                    g.FillPie(brush, boundingRect.X, boundingRect.Y, boundingRect.Width, boundingRect.Height, -90f, sweepAngle);
+                }
+            }
+        }
+
+        private float GetEnemyRadiusScale(EnemyColor color)
+        {
+            // Green keeps its original size; everything else reads a bit smaller.
+            return color switch
+            {
+                EnemyColor.Green => 0.35f,
+                _ => 0.28f
+            };
+        }
+
+        private Color GetEnemyColor(EnemyColor color)
+        {
+            return color switch
+            {
+                EnemyColor.Grey => Color.Gray,
+                EnemyColor.Yellow => Color.Yellow,
+                EnemyColor.Aqua => Color.Aqua,
+                EnemyColor.Green => Color.Green,
+                EnemyColor.Blue => Color.DodgerBlue,
+                _ => Color.White
+            };
+        }
+
+        private Image GetTexture(TileType type)
+        {
+            return type switch
+            {
+                TileType.Path => pathTexture,
+                TileType.Obstacle => obstacleTexture,
+                TileType.Elevated => elevatedTexture,
+                TileType.Entrance => entranceTexture,
+                TileType.Exit => exitTexture,
+                TileType.Open => openTexture,
+                _ => openTexture
+            };
+        }
+
+        private void Form1_KeyDown(object sender, KeyEventArgs e)
+        {
+            int? numberSlot = GetHotbarSlotFromKey(e.KeyCode);
+            if (numberSlot.HasValue)
+            {
+                selectedHotbarSlot = selectedHotbarSlot == numberSlot.Value ? -1 : numberSlot.Value;
+                selectedRotation = 0;
+                gamePanel.Invalidate();
+                return;
+            }
+
+            if (e.KeyCode == Keys.R && selectedHotbarSlot != -1)
+            {
+                selectedRotation = (selectedRotation + 90) % 360;
+                gamePanel.Invalidate();
+                return;
+            }
+
+            // R also re-orients an already-placed unit that's currently selected (via
+            // clicking it — see selectedPlacedShapeForRange) rather than only being
+            // available before it's placed. This matters more now that ranges are WxH
+            // rectangles instead of uniform squares — turning a placed Yellow (3x2)
+            // sideways actually reaches a different set of tiles.
+            if (e.KeyCode == Keys.R && selectedPlacedShapeForRange != null)
+            {
+                selectedPlacedShapeForRange.Rotation = (selectedPlacedShapeForRange.Rotation + 90) % 360;
+                gamePanel.Invalidate();
+                return;
+            }
+
+            if (enemyManager == null || !enemyManager.AwaitingEarlyWaveCall)
+            {
+                return;
+            }
+
+            if (e.KeyCode == Keys.Y)
+            {
+                enemyManager.ConfirmEarlyWaveCall();
+            }
+            else if (e.KeyCode == Keys.N)
+            {
+                enemyManager.DeclineEarlyWaveCall();
+            }
+        }
+
+        private int? GetHotbarSlotFromKey(Keys key)
+        {
+            switch (key)
+            {
+                case Keys.D1:
+                case Keys.NumPad1:
+                    return 0;
+                case Keys.D2:
+                case Keys.NumPad2:
+                    return 1;
+                case Keys.D3:
+                case Keys.NumPad3:
+                    return 2;
+                case Keys.D4:
+                case Keys.NumPad4:
+                    return 3;
+                case Keys.D5:
+                case Keys.NumPad5:
+                    return 4;
+                case Keys.D6:
+                case Keys.NumPad6:
+                    return 5;
+                default:
+                    return null;
+            }
+        }
+
+        private void GamePanel_MouseClick(object sender, MouseEventArgs e)
+        {
+            // A drag-release fires MouseClick too (button went down and up over the
+            // same control), which would otherwise be misread as "clicked outside the
+            // panel" and close it right as the player lets go of a drag.
+            if (justFinishedDraggingUpgradePanel)
+            {
+                justFinishedDraggingUpgradePanel = false;
+                return;
+            }
+
+            if (showInventoryPanel)
+            {
+                HandleInventoryPanelClick(e.Location);
+                return;
+            }
+
+            if (showSettingsPanel)
+            {
+                if (pauseToggleRect.Contains(e.Location)) isPaused = !isPaused;
+                else if (autoSkipToggleRect.Contains(e.Location)) autoSkipWave = !autoSkipWave;
+                else if (doubleSpeedToggleRect.Contains(e.Location)) doubleSpeed = !doubleSpeed;
+                else if (settingsCloseButtonRect.Contains(e.Location)) showSettingsPanel = false;
+                return;
+            }
+
+            if (selectedShapeForUpgrade != null)
+            {
+                if (closeUpgradePanelRect.Contains(e.Location))
+                {
+                    CloseUpgradePanel();
+                    return;
+                }
+
+                if (upgradeButtonRect.Contains(e.Location))
+                {
+                    TryUpgradeShape(selectedShapeForUpgrade);
+                    return;
+                }
+
+                if (sellButtonRect.Contains(e.Location))
+                {
+                    TrySellShape(selectedShapeForUpgrade);
+                    return;
+                }
+
+                if (targetFirstRect.Contains(e.Location))
+                {
+                    selectedShapeForUpgrade.TargetingMode = TargetingMode.First;
+                    return;
+                }
+                if (targetLastRect.Contains(e.Location))
+                {
+                    selectedShapeForUpgrade.TargetingMode = TargetingMode.Last;
+                    return;
+                }
+                if (targetClosestRect.Contains(e.Location))
+                {
+                    selectedShapeForUpgrade.TargetingMode = TargetingMode.Closest;
+                    return;
+                }
+                if (targetFarthestRect.Contains(e.Location))
+                {
+                    selectedShapeForUpgrade.TargetingMode = TargetingMode.Farthest;
+                    return;
+                }
+                if (targetLowestHpRect.Contains(e.Location))
+                {
+                    selectedShapeForUpgrade.TargetingMode = TargetingMode.LowestHp;
+                    return;
+                }
+                if (targetHighestHpRect.Contains(e.Location))
+                {
+                    selectedShapeForUpgrade.TargetingMode = TargetingMode.HighestHp;
+                    return;
+                }
+
+                if (!upgradePanelRect.Contains(e.Location))
+                {
+                    // Clicking anywhere on the map closes the panel AND clears the
+                    // range indicator in the same click — then falls through to normal
+                    // map-click handling below, so clicking directly on a different
+                    // unit selects that one right away instead of taking two clicks.
+                    CloseUpgradePanel();
+                }
+                else
+                {
+                    return;
+                }
+            }
+
+            if (settingsButtonRect.Contains(e.Location))
+            {
+                showSettingsPanel = true;
+                return;
+            }
+
+            if (inventoryButtonRect.Contains(e.Location))
+            {
+                showInventoryPanel = true;
+                selectedInventoryUnit = null;
+                return;
+            }
+
+            if (enemyManager != null && enemyManager.AwaitingEarlyWaveCall)
+            {
+                if (earlyCallYesButton.Contains(e.Location))
+                {
+                    enemyManager.ConfirmEarlyWaveCall();
+                    return;
+                }
+                if (earlyCallNoButton.Contains(e.Location))
+                {
+                    enemyManager.DeclineEarlyWaveCall();
+                    return;
+                }
+            }
+
+            for (int i = 0; i < hotbarSlotRects.Length; i++)
+            {
+                if (hotbarSlotRects[i].Contains(e.Location))
+                {
+                    selectedHotbarSlot = selectedHotbarSlot == i ? -1 : i;
+                    selectedRotation = 0;
+                    return;
+                }
+            }
+
+            if (selectedHotbarSlot != -1 && TryPlaceSelectedShape(e.Location))
+            {
+                return;
+            }
+
+            if (selectedHotbarSlot == -1)
+            {
+                var clickedShape = GetPlacedShapeAtLocation(e.Location);
+                // Allow selecting both placed Triangles and Line traps so the player
+                // can open the upgrade panel for traps as well as towers.
+                if (clickedShape != null && (clickedShape.Type == ShapeType.Triangle || clickedShape.Type == ShapeType.Line))
+                {
+                    selectedShapeForUpgrade = clickedShape;
+                    selectedPlacedShapeForRange = clickedShape;
+                }
+                else
+                {
+                    CloseUpgradePanel();
+                }
+                return;
+            }
+        }
+
+        private PlacedShape GetPlacedShapeAtLocation(Point clickLocation)
+        {
+            if (currentFloor == null)
+            {
+                return null;
+            }
+
+            var (tileSize, offsetX, offsetY) = ComputeGridMetrics();
+
+            if (clickLocation.X < offsetX || clickLocation.Y < offsetY)
+            {
+                return null;
+            }
+
+            int col = (clickLocation.X - offsetX) / tileSize;
+            int row = (clickLocation.Y - offsetY) / tileSize;
+
+            foreach (var shape in placedShapes)
+            {
+                if (shape.Row == row && shape.Col == col)
+                {
+                    return shape;
+                }
+            }
+
+            return null;
+        }
+
+        private void GamePanel_MouseMove(object sender, MouseEventArgs e)
+        {
+            // Just record the position — the game timer already repaints ~30x/second,
+            // so the preview picks this up on the next tick without us forcing extra
+            // Invalidate() calls here, which used to flood the message queue and
+            // stall the timer while a shape was selected. The same applies to dragging
+            // the upgrade panel below: just update the target position and let the
+            // timer's own repaint pick it up.
+            hoveredMouseLocation = e.Location;
+
+            if (isDraggingUpgradePanel)
+            {
+                int dx = e.Location.X - upgradePanelDragMouseStart.X;
+                int dy = e.Location.Y - upgradePanelDragMouseStart.Y;
+                int newX = upgradePanelDragOriginStart.X + dx;
+                int newY = upgradePanelDragOriginStart.Y + dy;
+
+                // Keep at least a corner of the panel on-screen so it can never be
+                // dragged somewhere the player can't get it back from.
+                newX = Math.Max(-UpgradePanelWidth + 60, Math.Min(newX, gamePanel.Width - 60));
+                newY = Math.Max(0, Math.Min(newY, Math.Max(0, gamePanel.Height - UpgradePanelTitleBarHeight)));
+
+                upgradePanelCustomPosition = new Point(newX, newY);
+            }
+        }
+
+        private void GamePanel_MouseLeave(object sender, EventArgs e)
+        {
+            hoveredMouseLocation = null;
+        }
+
+        private void GamePanel_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (selectedShapeForUpgrade != null
+                && upgradePanelTitleBarRect.Contains(e.Location)
+                && !closeUpgradePanelRect.Contains(e.Location))
+            {
+                isDraggingUpgradePanel = true;
+                upgradePanelDragMouseStart = e.Location;
+                upgradePanelDragOriginStart = upgradePanelCustomPosition ?? upgradePanelRect.Location;
+            }
+        }
+
+        private void GamePanel_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (isDraggingUpgradePanel)
+            {
+                isDraggingUpgradePanel = false;
+                justFinishedDraggingUpgradePanel = true;
+            }
+        }
+
+        private bool TryPlaceSelectedShape(Point clickLocation)
+        {
+            UnitId? slotUnit = hotbarSlotUnits[selectedHotbarSlot];
+            if (slotUnit == null || currentFloor == null || playerState == null)
+            {
+                return false;
+            }
+
+            var (tileSize, offsetX, offsetY) = ComputeGridMetrics();
+
+            if (clickLocation.X < offsetX || clickLocation.Y < offsetY)
+            {
+                return false;
+            }
+
+            int col = (clickLocation.X - offsetX) / tileSize;
+            int row = (clickLocation.Y - offsetY) / tileSize;
+
+            if (row < 0 || row >= currentFloor.Rows || col < 0 || col >= currentFloor.Cols)
+            {
+                return false;
+            }
+
+            UnitId unit = slotUnit.Value;
+
+            // Line is a trap and can only go on path tiles; standing towers need open
+            // ground, except elevation-only units (currently just Blue Triangle), which
+            // need to be built on an Elevated tile instead — that's the whole trade-off
+            // for being able to reach elevated enemies.
+            if (unit.Type == ShapeType.Line && currentFloor.Tiles[row, col].Type != TileType.Path)
+            {
+                Console.WriteLine("Line can only be placed on path tiles.");
+                return true;
+            }
+
+            bool requiresElevatedGround = RequiresElevatedGround(unit);
+
+            if (unit.Type != ShapeType.Line)
+            {
+                TileType requiredTile = requiresElevatedGround ? TileType.Elevated : TileType.Open;
+                if (currentFloor.Tiles[row, col].Type != requiredTile)
+                {
+                    string requiredName = requiresElevatedGround ? "elevated" : "open ground";
+                    Console.WriteLine($"{unit.Color} {unit.Type} can only be placed on {requiredName} tiles.");
+                    return true;
+                }
+            }
+
+            if (IsTileOccupied(row, col))
+            {
+                Console.WriteLine("That tile already has a shape on it.");
+                return true;
+            }
+
+            if (!ShapeCosts.TryGetValue(unit, out int cost))
+            {
+                Console.WriteLine($"{unit} doesn't have a placement cost set up yet.");
+                return true;
+            }
+
+            if (!playerState.TrySpend(cost))
+            {
+                Console.WriteLine($"Not enough cash to place {unit} (costs {cost}).");
+                return true;
+            }
+
+            placedShapes.Add(new PlacedShape(row, col, unit.Type, unit.Color, selectedRotation));
+            return true;
+        }
+
+        private void HandleInventoryPanelClick(Point location)
+        {
+            if (inventoryCloseButtonRect.Contains(location))
+            {
+                showInventoryPanel = false;
+                selectedInventoryUnit = null;
+                return;
+            }
+
+            foreach (var owned in inventoryOwnedSlots)
+            {
+                if (owned.Rect.Contains(location))
+                {
+                    selectedInventoryUnit = selectedInventoryUnit == owned.Unit ? (UnitId?)null : owned.Unit;
+                    return;
+                }
+            }
+
+            for (int i = 0; i < inventoryLoadoutSlotRects.Length; i++)
+            {
+                if (inventoryLoadoutSlotRects[i].Contains(location))
+                {
+                    // With a unit selected: assign it to this slot (selection stays active so
+                    // the same unit can be dropped into more than one slot in a row).
+                    // With nothing selected: clicking a slot clears whatever's in it.
+                    hotbarSlotUnits[i] = selectedInventoryUnit;
+                    return;
+                }
+            }
+
+            // Clicks elsewhere inside the dimmed overlay just do nothing — panel stays open.
+        }
+
+        private bool IsTileOccupied(int row, int col)
+        {
+            foreach (var shape in placedShapes)
+            {
+                if (shape.Row == row && shape.Col == col)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    public class DoubleBufferedPanel : Panel
+    {
+        public DoubleBufferedPanel()
+        {
+            this.DoubleBuffered = true;
+
+            this.SetStyle(
+                ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.UserPaint |
+                ControlStyles.OptimizedDoubleBuffer,
+                true
+            );
+        }
+    }
+}

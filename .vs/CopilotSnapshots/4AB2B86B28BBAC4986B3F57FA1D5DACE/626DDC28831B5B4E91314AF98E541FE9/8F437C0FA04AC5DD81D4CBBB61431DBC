@@ -1,0 +1,195 @@
+﻿using System;
+
+namespace TDGachaGame
+{
+    public class Enemy
+    {
+        public EnemyColor Color
+        {
+            get;
+        }
+
+        public float MaxHealth
+        {
+            get;
+        }
+
+        public float CurrentHealth
+        {
+            get;
+            private set;
+        }
+
+        public float Speed
+        {
+            get;
+        }
+
+        public int DamageToExit
+        {
+            get;
+        }
+
+        public float PathProgress
+        {
+            get;
+            private set;
+        }
+
+        // Tracks the last path-waypoint index this enemy was checked against for
+        // trap triggers, so a trap only fires once per tile the enemy passes over
+        // instead of every tick it lingers there.
+        public int LastTrapCheckIndex
+        {
+            get;
+            set;
+        } = -1;
+
+        public int SplitGeneration
+        {
+            get;
+        }
+
+        public bool IsDead => CurrentHealth <= 0f;
+
+        // --- Status effects, driven by trap/tower triggers (currently just Line traps). ---
+        // These share one generic damage-over-time channel rather than separate
+        // independent burn/poison tracks — a simplification until there's a reason
+        // to model them as distinct simultaneous effects.
+        public bool IsStunned => stunTimeRemaining > 0f;
+
+        // True while under any DoT tick (poison and burn share one channel -- see the
+        // comment above). Used by Green's targeting to prefer enemies that aren't
+        // already poisoned, so its DoT spreads across more targets instead of stacking
+        // repeatedly onto the same one while others go untouched.
+        public bool IsAffectedByDot => dotTimeRemaining > 0f;
+
+        // Elevated is a persistent trait of the enemy's color (currently just Blue),
+        // not a timed effect — a Blue circle is "up in the air" for its whole life,
+        // out of reach of ground-only towers, until something forces it down. A Blue
+        // Line trap does that: it grounds an elevated enemy for a few seconds, making
+        // it briefly vulnerable to ground-only towers too. Grounding a non-elevated
+        // enemy is a harmless no-op — it was never elevated in the first place.
+        public bool IsElevated => Color == EnemyColor.Blue && groundedTimeRemaining <= 0f;
+
+        private float slowFactor = 1f;
+        private float slowTimeRemaining;
+        private float stunTimeRemaining;
+        private float dotDamagePerSecond;
+        private float dotTimeRemaining;
+        private float groundedTimeRemaining;
+
+        public Enemy(EnemyColor color, int splitGeneration = 0)
+        {
+            Color = color;
+            SplitGeneration = splitGeneration;
+
+            float healthScale = splitGeneration > 0 ? 0.5f : 1f;
+            MaxHealth = EnemyStatsTable.GetBaseHealth(color) * healthScale;
+            CurrentHealth = MaxHealth;
+            Speed = EnemyStatsTable.GetBaseSpeed(color);
+            DamageToExit = Math.Max(1, EnemyStatsTable.GetBaseDamageToExit(color) - splitGeneration);
+        }
+
+        public void TakeDamage(float amount)
+        {
+            CurrentHealth = Math.Max(0f, CurrentHealth - amount);
+        }
+
+        // Slow keeps the strongest multiplier and longest remaining duration seen so far.
+        public void ApplySlow(float speedMultiplier, float durationSeconds)
+        {
+            slowFactor = Math.Min(slowFactor, speedMultiplier);
+            slowTimeRemaining = Math.Max(slowTimeRemaining, durationSeconds);
+        }
+
+        public void ApplyStun(float durationSeconds)
+        {
+            stunTimeRemaining = Math.Max(stunTimeRemaining, durationSeconds);
+        }
+
+        // Overwrite-style DoT (e.g. burn): takes the stronger tick rate, refreshes the timer.
+        public void ApplyBurn(float damagePerSecond, float durationSeconds)
+        {
+            dotDamagePerSecond = Math.Max(dotDamagePerSecond, damagePerSecond);
+            dotTimeRemaining = Math.Max(dotTimeRemaining, durationSeconds);
+        }
+
+        // Stacking-style DoT (e.g. poison): adds to the current tick rate, refreshes the timer.
+        public void ApplyPoison(float damagePerSecondPerStack, float durationSeconds)
+        {
+            dotDamagePerSecond += damagePerSecondPerStack;
+            dotTimeRemaining = Math.Max(dotTimeRemaining, durationSeconds);
+        }
+
+        public void ApplyKnockback(float tiles)
+        {
+            PathProgress = Math.Max(0f, PathProgress - tiles);
+        }
+
+        // Forces a currently-elevated enemy down to the ground for a while, exposing it
+        // to ground-only towers that normally can't reach it at all.
+        public void ApplyGrounded(float durationSeconds)
+        {
+            groundedTimeRemaining = Math.Max(groundedTimeRemaining, durationSeconds);
+        }
+
+        public void Advance(float deltaSeconds)
+        {
+            TickStatusEffects(deltaSeconds);
+
+            float effectiveSpeed = IsStunned ? 0f : Speed * slowFactor;
+            PathProgress += effectiveSpeed * deltaSeconds;
+        }
+
+        private void TickStatusEffects(float deltaSeconds)
+        {
+            if (dotTimeRemaining > 0f)
+            {
+                TakeDamage(dotDamagePerSecond * deltaSeconds);
+                dotTimeRemaining -= deltaSeconds;
+
+                if (dotTimeRemaining <= 0f)
+                {
+                    dotTimeRemaining = 0f;
+                    dotDamagePerSecond = 0f;
+                }
+            }
+
+            if (slowTimeRemaining > 0f)
+            {
+                slowTimeRemaining -= deltaSeconds;
+
+                if (slowTimeRemaining <= 0f)
+                {
+                    slowTimeRemaining = 0f;
+                    slowFactor = 1f;
+                }
+            }
+
+            if (stunTimeRemaining > 0f)
+            {
+                stunTimeRemaining = Math.Max(0f, stunTimeRemaining - deltaSeconds);
+            }
+
+            if (groundedTimeRemaining > 0f)
+            {
+                groundedTimeRemaining = Math.Max(0f, groundedTimeRemaining - deltaSeconds);
+            }
+        }
+
+        public Enemy[] OnDeath()
+        {
+            if (Color == EnemyColor.Aqua && SplitGeneration < 2)
+            {
+                return new[]
+                {
+                    new Enemy(EnemyColor.Aqua, SplitGeneration + 1),
+                    new Enemy(EnemyColor.Aqua, SplitGeneration + 1)
+                };
+            }
+
+            return Array.Empty<Enemy>();
+        }
+    }
+}

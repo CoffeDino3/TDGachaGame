@@ -1,0 +1,121 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "E:\\Visual\\Game\\TDGachaGame\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|e:\\visual\\game\\tdgachagame\\floorenemygenerator.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|solutionrelative:floorenemygenerator.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|e:\\visual\\game\\tdgachagame\\enemystatstable.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|solutionrelative:enemystatstable.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|e:\\visual\\game\\tdgachagame\\form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|solutionrelative:form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|e:\\visual\\game\\tdgachagame\\form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form",
+      "RelativeMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|solutionrelative:form1.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}|Form"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|e:\\visual\\game\\tdgachagame\\playerprofile.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|solutionrelative:playerprofile.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|e:\\visual\\game\\tdgachagame\\enemy.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{6420E1FB-9CA0-47DD-D753-085277D93095}|TDGachaGame.csproj|solutionrelative:enemy.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 3,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "Form1.cs",
+              "DocumentMoniker": "E:\\Visual\\Game\\TDGachaGame\\Form1.cs",
+              "RelativeDocumentMoniker": "Form1.cs",
+              "ToolTip": "E:\\Visual\\Game\\TDGachaGame\\Form1.cs",
+              "RelativeToolTip": "Form1.cs",
+              "ViewState": "AgIAAMoMAAAAAAAAAAAswMwMAAApAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-10-07T20:04:52.699Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "Form1.cs [Design]",
+              "DocumentMoniker": "E:\\Visual\\Game\\TDGachaGame\\Form1.cs",
+              "RelativeDocumentMoniker": "Form1.cs",
+              "ToolTip": "E:\\Visual\\Game\\TDGachaGame\\Form1.cs [Design]",
+              "RelativeToolTip": "Form1.cs [Design]",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-10-07T20:04:49.323Z",
+              "EditorCaption": " [Design]"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "PlayerProfile.cs",
+              "DocumentMoniker": "E:\\Visual\\Game\\TDGachaGame\\PlayerProfile.cs",
+              "RelativeDocumentMoniker": "PlayerProfile.cs",
+              "ToolTip": "E:\\Visual\\Game\\TDGachaGame\\PlayerProfile.cs",
+              "RelativeToolTip": "PlayerProfile.cs",
+              "ViewState": "AgIAADgCAAAAAAAAAAAYwFUCAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-10-07T20:04:41.867Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "FloorEnemyGenerator.cs",
+              "DocumentMoniker": "E:\\Visual\\Game\\TDGachaGame\\FloorEnemyGenerator.cs",
+              "RelativeDocumentMoniker": "FloorEnemyGenerator.cs",
+              "ToolTip": "E:\\Visual\\Game\\TDGachaGame\\FloorEnemyGenerator.cs",
+              "RelativeToolTip": "FloorEnemyGenerator.cs",
+              "ViewState": "AgIAAFMAAAAAAAAAAAAkwFUAAAAJAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-10-07T20:04:34.342Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "EnemyStatsTable.cs",
+              "DocumentMoniker": "E:\\Visual\\Game\\TDGachaGame\\EnemyStatsTable.cs",
+              "RelativeDocumentMoniker": "EnemyStatsTable.cs",
+              "ToolTip": "E:\\Visual\\Game\\TDGachaGame\\EnemyStatsTable.cs",
+              "RelativeToolTip": "EnemyStatsTable.cs",
+              "ViewState": "AgIAACYAAAAAAAAAAAAuwDgAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-10-07T20:04:28.089Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 5,
+              "Title": "Enemy.cs",
+              "DocumentMoniker": "E:\\Visual\\Game\\TDGachaGame\\Enemy.cs",
+              "RelativeDocumentMoniker": "Enemy.cs",
+              "ToolTip": "E:\\Visual\\Game\\TDGachaGame\\Enemy.cs",
+              "RelativeToolTip": "Enemy.cs",
+              "ViewState": "AgIAAK4AAAAAAAAAAAAYwMsAAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-10-07T20:04:16.444Z",
+              "EditorCaption": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

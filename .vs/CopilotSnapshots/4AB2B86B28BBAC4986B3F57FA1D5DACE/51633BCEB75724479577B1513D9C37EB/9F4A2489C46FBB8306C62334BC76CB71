@@ -1,0 +1,13 @@
+﻿namespace TDGachaGame
+{
+	// Dev-only testing knobs, kept in one place instead of scattered across Form1.cs
+	// so they're easy to find and just as easy to revert. Nothing in here should ship
+	// set to a non-default value -- set StartingStage back to 1 before presenting.
+	public static class DevConfig
+	{
+		// Which stage/floor the game starts on. Bump this up to jump straight into
+		// later-game difficulty/enemy variety without playing through every earlier
+		// floor first -- see Form1.currentStage, which reads this once at construction.
+		public static int StartingStage = 12;
+	}
+}

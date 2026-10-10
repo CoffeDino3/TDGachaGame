@@ -1,0 +1,217 @@
+﻿using System;
+using System.Collections.Generic;
+
+namespace TDGachaGame
+{
+    // One purchasable rung on a color's upgrade ladder. Index 0 in a color's list is
+    // always the free, un-upgraded "Level 1" baseline (Cost = 0) — everything after
+    // that is something the player can buy with TryUpgradeShape. Ladders are NOT the
+    // same length for every color on purpose (some colors are simple and shallow,
+    // others have a lot of room to grow) and they don't all grow the same stats:
+    // SpecialValue / SpecialValue2 / CorridorWidthBonus mean different things
+    // depending on the color (see the field comments and TowerUpgradeConfig.Tiers).
+    public class TowerUpgradeTier
+    {
+        public int Level;
+        public int Cost;
+        public float DamageMultiplier = 1f;
+        public float RangeMultiplier = 1f;
+        public float AttackIntervalMultiplier = 1f;
+
+        // Meaning depends on color:
+        //   Purple -> stun duration (seconds)
+        //   Green  -> poison damage-per-second
+        //   Black  -> slow strength, as a speed multiplier (lower = stronger slow)
+        //   White  -> ally attack-speed buff duration (seconds)
+        //   everyone else -> unused (0)
+        public float SpecialValue;
+
+        // Meaning depends on color:
+        //   Green  -> poison duration (seconds)
+        //   Black  -> slow duration (seconds)
+        //   White  -> ally attack-speed buff multiplier
+        //   everyone else -> unused (0)
+        public float SpecialValue2;
+
+        // Extra half-width added to the beam's hit corridor (see
+        // TowerManager.FindEnemiesAlongLineToward) — widens how many enemies a single
+        // beam can clip on its way through, on top of the color's baseline corridor.
+        public float CorridorWidthBonus;
+
+        // Capstone perk: how many EXTRA beams (on top of the normal one) this tier
+        // fires in the same attack, each at a different enemy (see
+        // TowerManager.TryFireTriangle). 0 = just the normal single beam, 1 = double
+        // beam, 2 = triple beam. Lets a color's ladder ramp beam count up gradually
+        // (e.g. Black going double beam partway up its ladder, then triple at max)
+        // instead of only ever jumping straight from one beam to two.
+        public int ExtraBeamCount;
+
+        // Capstone perk: when > 0, White's buff pulse also grants allies an attack
+        // damage buff (multiplier applied on top of the attack-speed buff) alongside
+        // the usual speed buff, for the same duration. 0 = no damage buff yet.
+        public float DamageBuffMultiplier;
+    }
+
+    public static class TowerUpgradeConfig
+    {
+        // White's attack cooldown is always this much longer than its own buff
+        // duration (SpecialValue), at every level — see
+        // PlacedShape.GetCurrentAttackInterval and Form1.BuildUpgradeStatRows, which
+        // both read this instead of hardcoding the buffer in two places.
+        public const float WhiteCooldownBuffer = 2.0f;
+
+        // Level-1 (un-upgraded) baseline stats per color: damage, range (in the same
+        // tile units TowerManager's range rectangles use), and attack interval in
+        // seconds (lower = faster).
+        private static readonly Dictionary<ShapeColor, (float baseDamage, float baseRange, float baseInterval)> BaseStats
+            = new Dictionary<ShapeColor, (float, float, float)>
+            {
+                [ShapeColor.Yellow] = (5f, 1.5f, 0.4f),
+                [ShapeColor.Red] = (45f, 2.5f, 2.5f),
+                [ShapeColor.Purple] = (0f, 1.5f, 1.5f),
+                [ShapeColor.Cyan] = (13f, 2.5f, 1.0f),
+                [ShapeColor.Green] = (0f, 1.5f, 1.2f),
+                [ShapeColor.Black] = (16f, 2.0f, 1.4f),
+                [ShapeColor.White] = (0f, 2.5f, 1.3f),
+                [ShapeColor.Blue] = (30f, 3.5f, 1.6f),
+            };
+
+        private static readonly Dictionary<ShapeColor, List<TowerUpgradeTier>> Tiers = BuildAllTiers();
+
+        public static (float damage, float range, float interval) GetBaseStats(ShapeColor color) => BaseStats[color];
+
+        public static int GetTierCount(ShapeColor color) => Tiers[color].Count;
+
+        public static int GetMaxUpgradeLevel(ShapeColor color) => Tiers[color].Count - 1;
+
+        // upgradeLevel is 0-based (how many upgrades have been purchased so far) and
+        // maps directly onto the tier list index — tier[0] is the free baseline.
+        public static TowerUpgradeTier GetTier(ShapeColor color, int upgradeLevel)
+        {
+            var list = Tiers[color];
+            int index = Math.Max(0, Math.Min(upgradeLevel, list.Count - 1));
+            return list[index];
+        }
+
+        // Null once the color is fully upgraded.
+        public static TowerUpgradeTier GetNextTier(ShapeColor color, int upgradeLevel)
+        {
+            var list = Tiers[color];
+            int nextIndex = upgradeLevel + 1;
+            return nextIndex < list.Count ? list[nextIndex] : null;
+        }
+
+        public static int GetSellValue(ShapeColor color, int upgradeLevel)
+        {
+            var list = Tiers[color];
+            int total = 0;
+            int cappedLevel = Math.Min(upgradeLevel, list.Count - 1);
+            for (int i = 1; i <= cappedLevel; i++)
+            {
+                total += list[i].Cost;
+            }
+            return (int)(total * 0.6f);
+        }
+
+        private static Dictionary<ShapeColor, List<TowerUpgradeTier>> BuildAllTiers()
+        {
+            return new Dictionary<ShapeColor, List<TowerUpgradeTier>>
+            {
+                // Cheap early-game spammable tower: shallow ladder, all-in on getting
+                // even faster rather than hitting harder. Costs scaled down hard (this
+                // is the 70-cost unlock) so it stays the actual cheap option.
+                [ShapeColor.Yellow] = BuildTiers(
+                    count: 3, costs: new[] { 20, 50 },
+                    dmgGrowth: 1.15f, rangeGrowth: 1.05f, intervalShrink: 0.82f),
+
+                // Slow, heavy single-target hitter: ladder leans almost entirely on
+                // damage per hit rather than speed or range.
+                [ShapeColor.Red] = BuildTiers(
+                    count: 4, costs: new[] { 100, 230, 420 },
+                    dmgGrowth: 1.35f, rangeGrowth: 1.08f, intervalShrink: 0.97f),
+
+                // Stun support: each rung buys a longer stun, and the final rung is a
+                // capstone that fires a second stun beam at a different target in the
+                // same attack ("double beam").
+                [ShapeColor.Purple] = BuildTiers(
+                    count: 5, costs: new[] { 80, 170, 300, 460 },
+                    dmgGrowth: 1f, rangeGrowth: 1.08f, intervalShrink: 0.97f,
+                    special1: i => 1.0f + i * 0.35f,
+                    extraBeamCount: i => i == 4 ? 1 : 0),
+
+                // Piercing cone: damage grows modestly, but the beam's hit corridor
+                // widens every rung so it clips more enemies lined up behind the target.
+                [ShapeColor.Cyan] = BuildTiers(
+                    count: 5, costs: new[] { 90, 180, 300, 450 },
+                    dmgGrowth: 1.18f, rangeGrowth: 1.10f, intervalShrink: 0.95f,
+                    corridorBonus: i => i * 0.18f),
+
+                // Hybrid slow + damage: slow gets both stronger (lower multiplier) and
+                // longer-lasting as it's upgraded. Rarest/priciest ladder, and its
+                // capstone ramps up gradually instead of a single jump: double beam
+                // partway up the ladder (level 3), then a third beam at the very top
+                // (level 5, max).
+                [ShapeColor.Black] = BuildTiers(
+                    count: 5, costs: new[] { 160, 330, 560, 840 },
+                    dmgGrowth: 1.15f, rangeGrowth: 1.08f, intervalShrink: 0.96f,
+                    special1: i => 0.70f - i * 0.05f,
+                    special2: i => 5f + i * 1f,
+                    extraBeamCount: i => i == 4 ? 2 : (i == 2 ? 1 : 0)),
+
+                // Buff support: buff duration and buff strength both climb with level.
+                // Cooldown isn't set here at all — PlacedShape.GetCurrentAttackInterval
+                // derives it directly from SpecialValue (buff duration) so the two can
+                // never drift apart. At max level (i == 3) it also starts granting
+                // allies a flat attack-damage buff alongside the usual speed buff.
+                [ShapeColor.White] = BuildTiers(
+                    count: 4, costs: new[] { 130, 270, 480 },
+                    dmgGrowth: 1f, rangeGrowth: 1.10f, intervalShrink: 0.95f,
+                    special1: i => 2.0f + i * 0.5f,
+                    special2: i => 1.5f + i * 0.15f,
+                    damageBuffMultiplier: i => i == 3 ? 1.15f : 0f),
+
+                // Deepest ladder (6 rungs): poison damage and duration both scale, and
+                // the beam corridor gradually widens too, so a fully-upgraded Green
+                // spreads its DoT across a line of enemies instead of just one.
+                [ShapeColor.Green] = BuildTiers(
+                    count: 6, costs: new[] { 60, 120, 195, 290, 400 },
+                    dmgGrowth: 1f, rangeGrowth: 1.06f, intervalShrink: 0.97f,
+                    special1: i => 4f + i * 1.2f,
+                    special2: i => 4f + i * 0.6f,
+                    corridorBonus: i => i * 0.12f),
+
+                // Rare elevation sniper: already strong at level 1, so it only needs a
+                // short ladder to stay worth investing in.
+                [ShapeColor.Blue] = BuildTiers(
+                    count: 3, costs: new[] { 100, 220 },
+                    dmgGrowth: 1.25f, rangeGrowth: 1.12f, intervalShrink: 0.95f),
+            };
+        }
+
+        private static List<TowerUpgradeTier> BuildTiers(
+            int count, int[] costs, float dmgGrowth, float rangeGrowth, float intervalShrink,
+            Func<int, float> special1 = null, Func<int, float> special2 = null,
+            Func<int, float> corridorBonus = null, Func<int, int> extraBeamCount = null,
+            Func<int, float> damageBuffMultiplier = null)
+        {
+            var list = new List<TowerUpgradeTier>();
+            for (int i = 0; i < count; i++)
+            {
+                list.Add(new TowerUpgradeTier
+                {
+                    Level = i + 1,
+                    Cost = i == 0 ? 0 : costs[i - 1],
+                    DamageMultiplier = (float)Math.Pow(dmgGrowth, i),
+                    RangeMultiplier = (float)Math.Pow(rangeGrowth, i),
+                    AttackIntervalMultiplier = (float)Math.Pow(intervalShrink, i),
+                    SpecialValue = special1 != null ? special1(i) : 0f,
+                    SpecialValue2 = special2 != null ? special2(i) : 0f,
+                    CorridorWidthBonus = corridorBonus != null ? corridorBonus(i) : 0f,
+                    ExtraBeamCount = extraBeamCount != null ? extraBeamCount(i) : 0,
+                    DamageBuffMultiplier = damageBuffMultiplier != null ? damageBuffMultiplier(i) : 0f
+                });
+            }
+            return list;
+        }
+    }
+}

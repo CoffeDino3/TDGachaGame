@@ -1,0 +1,461 @@
+﻿using System;
+using System.Collections.Generic;
+
+namespace TDGachaGame
+{
+    public class EnemyManager
+    {
+        private enum WaveState
+        {
+            Spawning,
+            InterWaveDelay,
+            AllWavesComplete
+        }
+
+        public int BaseHealth
+        {
+            get;
+            private set;
+        }
+
+        public List<Enemy> ActiveEnemies
+        {
+            get;
+        } = new List<Enemy>();
+
+        public int CurrentWaveNumber
+        {
+            get;
+            private set;
+        }
+
+        public int TotalWaves
+        {
+            get;
+        }
+
+        public float ElapsedSeconds
+        {
+            get;
+            private set;
+        }
+
+        public bool IsBetweenWaves => state == WaveState.InterWaveDelay;
+
+        public float TimeUntilNextWave => IsBetweenWaves
+            ? Math.Max(0f, WaveGapSeconds - interWaveTimer)
+            : 0f;
+        public bool AwaitingEarlyWaveCall
+        {
+            get;
+            private set;
+        }
+
+        private readonly List<List<Enemy>> waves;
+        private int waveIndex;
+        private Queue<Enemy> spawnQueue = new Queue<Enemy>();
+        private float spawnTimer;
+        private float interWaveTimer;
+        private float waveElapsedSeconds;
+        private bool earlyCallOffered;
+        private WaveState state;
+
+        private const float SpawnInterval = 0.8f;
+        private const float WaveGapSeconds = 3f;
+        private const float EarlyCallThresholdSeconds = 30f;
+        public const float LineTrapFlatDamage = 15f;
+        // Traps are intentionally weaker than full towers; scale tower-tier effects
+        // down when applying trap effects. Per-color overrides allow some traps
+        // (Red/Cyan/Yellow) to benefit more from upgrades so they feel meaningful.
+        public const float TrapEffectScale = 0.6f;
+
+        private static readonly Dictionary<ShapeColor, float> TrapColorScaleOverrides = new Dictionary<ShapeColor, float>
+        {
+            [ShapeColor.Red] = 1.6f,
+            [ShapeColor.Cyan] = 1.5f,
+            [ShapeColor.Yellow] = 1.4f,
+            [ShapeColor.Black] = 1.0f,
+            [ShapeColor.White] = 1.0f,
+            [ShapeColor.Green] = 1.0f,
+            [ShapeColor.Blue] = 1.0f,
+            [ShapeColor.Purple] = 1.0f,
+        };
+
+        public static float GetCombinedTrapScale(ShapeColor color)
+        {
+            float overrideScale = TrapColorScaleOverrides.TryGetValue(color, out var v) ? v : 1f;
+            return TrapEffectScale * overrideScale;
+        }
+
+        private readonly List<(int r, int c)> waypoints;
+        private int pendingCashReward;
+
+        public bool FloorCleared => state == WaveState.AllWavesComplete;
+        public bool BaseDestroyed => BaseHealth <= 0;
+
+        public EnemyManager(FloorMap floor, List<List<Enemy>> enemyWaves, int baseHealth = 20)
+        {
+            waypoints = floor.PathWaypoints;
+            BaseHealth = baseHealth;
+
+            waves = enemyWaves;
+            TotalWaves = Math.Max(1, waves.Count);
+
+            waveIndex = 0;
+            CurrentWaveNumber = 1;
+            LoadWave(waveIndex);
+        }
+
+        private void LoadWave(int index)
+        {
+            spawnQueue = new Queue<Enemy>();
+
+            if (index < waves.Count)
+            {
+                foreach (var enemy in waves[index])
+                {
+                    spawnQueue.Enqueue(enemy);
+                }
+            }
+
+            CurrentWaveNumber = index + 1;
+            spawnTimer = 0f;
+            waveElapsedSeconds = 0f;
+            earlyCallOffered = false;
+            AwaitingEarlyWaveCall = false;
+            state = WaveState.Spawning;
+        }
+
+        public void ConfirmEarlyWaveCall()
+        {
+            if (!AwaitingEarlyWaveCall || waveIndex + 1 >= waves.Count)
+            {
+                return;
+            }
+
+            waveIndex++;
+
+            foreach (var enemy in waves[waveIndex])
+            {
+                spawnQueue.Enqueue(enemy);
+            }
+
+            CurrentWaveNumber = waveIndex + 1;
+            waveElapsedSeconds = 0f;
+            earlyCallOffered = false;
+            AwaitingEarlyWaveCall = false;
+        }
+        public void DeclineEarlyWaveCall()
+        {
+            AwaitingEarlyWaveCall = false;
+        }
+
+        public void Update(float deltaSeconds)
+        {
+            if (!BaseDestroyed && !FloorCleared)
+            {
+                ElapsedSeconds += deltaSeconds;
+            }
+
+            UpdateSpawning(deltaSeconds);
+            UpdateActiveEnemies(deltaSeconds);
+            UpdateWaveTransition(deltaSeconds);
+            UpdateEarlyWaveCallPrompt(deltaSeconds);
+        }
+
+        private void UpdateEarlyWaveCallPrompt(float deltaSeconds)
+        {
+            if (state != WaveState.Spawning)
+            {
+                return;
+            }
+
+            if (AwaitingEarlyWaveCall || earlyCallOffered)
+            {
+                return;
+            }
+
+            if (waveIndex + 1 >= waves.Count)
+            {
+                return;
+            }
+
+            waveElapsedSeconds += deltaSeconds;
+
+            if (waveElapsedSeconds >= EarlyCallThresholdSeconds)
+            {
+                AwaitingEarlyWaveCall = true;
+                earlyCallOffered = true;
+            }
+        }
+
+        private void UpdateWaveTransition(float deltaSeconds)
+        {
+            if (state != WaveState.Spawning)
+            {
+                if (state == WaveState.InterWaveDelay)
+                {
+                    interWaveTimer += deltaSeconds;
+
+                    if (interWaveTimer >= WaveGapSeconds)
+                    {
+                        interWaveTimer = 0f;
+                        waveIndex++;
+                        LoadWave(waveIndex);
+                    }
+                }
+
+                return;
+            }
+
+            bool waveDrained = spawnQueue.Count == 0 && ActiveEnemies.Count == 0;
+
+            if (!waveDrained)
+            {
+                return;
+            }
+
+            if (waveIndex + 1 < waves.Count)
+            {
+                state = WaveState.InterWaveDelay;
+                interWaveTimer = 0f;
+            }
+            else
+            {
+                state = WaveState.AllWavesComplete;
+            }
+
+            pendingCashReward += GetWaveClearReward();
+        }
+
+        private void UpdateSpawning(float deltaSeconds)
+        {
+            if (spawnQueue.Count == 0)
+            {
+                return;
+            }
+
+            spawnTimer += deltaSeconds;
+
+            if (spawnTimer >= SpawnInterval)
+            {
+                spawnTimer = 0f;
+                ActiveEnemies.Add(spawnQueue.Dequeue());
+            }
+        }
+
+        private void UpdateActiveEnemies(float deltaSeconds)
+        {
+            for (int i = ActiveEnemies.Count - 1; i >= 0; i--)
+            {
+                var enemy = ActiveEnemies[i];
+
+                if (enemy.IsDead)
+                {
+                    pendingCashReward += GetKillReward(enemy);
+                    ActiveEnemies.RemoveAt(i);
+                    ActiveEnemies.AddRange(enemy.OnDeath());
+                    continue;
+                }
+
+                enemy.Advance(deltaSeconds);
+
+                if (enemy.PathProgress >= waypoints.Count - 1)
+                {
+                    BaseHealth -= enemy.DamageToExit;
+                    ActiveEnemies.RemoveAt(i);
+                }
+            }
+        }
+
+        // Returns the enemy's true position in tile-center coordinates — i.e. the same
+        // frame of reference as a tower's (Row + 0.5, Col + 0.5). Waypoints themselves
+        // are stored as raw grid indices (a path tile's top-left corner, not its
+        // center), so both the "from" and "to" waypoint get shifted by half a tile
+        // before interpolating between them. Previously this shift was missing here and
+        // instead bolted on only at the render site (Form1.DrawEnemies), which meant
+        // every distance/angle check in TowerManager (range tests, facing, beam aim)
+        // was silently comparing a tower's centered position against an enemy position
+        // that was still anchored a half-tile off — a constant diagonal offset that
+        // shows up as targeting looking "a bit off" up close (where that half-tile is a
+        // big chunk of the distance) and as the effective range boundary depending on
+        // which side an enemy approaches from. Centering it here fixes it everywhere at
+        // once instead of needing every caller to remember to add 0.5 itself.
+        public (float r, float c) GetInterpolatedPosition(Enemy enemy)
+        {
+            int index = (int)enemy.PathProgress;
+            index = System.Math.Min(index, waypoints.Count - 1);
+
+            if (index >= waypoints.Count - 1)
+            {
+                var last = waypoints[waypoints.Count - 1];
+                return (last.r + 0.5f, last.c + 0.5f);
+            }
+
+            var from = waypoints[index];
+            var to = waypoints[index + 1];
+            float t = enemy.PathProgress - index;
+
+            return (from.r + 0.5f + (to.r - from.r) * t, from.c + 0.5f + (to.c - from.c) * t);
+        }
+        public void ApplyLineTrapDamage(IReadOnlyList<PlacedShape> placedShapes)
+        {
+            Dictionary<(int r, int c), PlacedShape> trapTiles = null;
+
+            foreach (var enemy in ActiveEnemies)
+            {
+                int currentIndex = Math.Min((int)enemy.PathProgress, waypoints.Count - 1);
+
+                // Only trigger when the enemy reaches a tile index it hasn't already
+                // triggered a trap on. This has to be a one-way high-water mark, not just
+                // "did the index change" — Cyan's knockback lowers PathProgress, and an
+                // equality check would treat that lower index as "new" again, re-firing
+                // the same trap and knocking the enemy back forever.
+                if (currentIndex <= enemy.LastTrapCheckIndex)
+                {
+                    continue;
+                }
+
+                enemy.LastTrapCheckIndex = currentIndex;
+
+                if (trapTiles == null)
+                {
+                    trapTiles = new Dictionary<(int r, int c), PlacedShape>();
+
+                    foreach (var shape in placedShapes)
+                    {
+                        if (shape.Type == ShapeType.Line)
+                        {
+                            trapTiles[(shape.Row, shape.Col)] = shape;
+                        }
+                    }
+                }
+
+                var cell = waypoints[currentIndex];
+
+                if (trapTiles.TryGetValue((cell.r, cell.c), out PlacedShape trapShape))
+                {
+                    ApplyLineTrapEffect(enemy, trapShape, cell, placedShapes);
+                }
+            }
+        }
+
+        // Approximates the Line ability table from the design doc. Black's "also affects
+        // adjacent elevated tiles" piece is still stubbed. Blue grounds an elevated
+        // enemy, briefly exposing it to ground-only towers (a no-op against anything
+        // that wasn't elevated to begin with). White gives a 1.2x attack-speed pulse to
+        // every tower (not another Line trap) on an adjacent tile — including
+        // diagonals — when an enemy triggers it.
+        private void ApplyLineTrapEffect(Enemy enemy, PlacedShape trapShape, (int r, int c) trapPosition, IReadOnlyList<PlacedShape> placedShapes)
+        {
+            // Read the upgrade tier for the trap so upgrades affect trap potency,
+            // but scale them down via TrapEffectScale so traps remain weaker than
+            // full towers.
+            var tier = TowerUpgradeConfig.GetTier(trapShape.Color, trapShape.UpgradeLevel);
+
+            switch (trapShape.Color)
+            {
+                case ShapeColor.Black:
+                    // Damage scales with tier damage multiplier, then with global trap
+                    // scale. SpecialValue = slow strength (speed multiplier lower=stronger),
+                    // SpecialValue2 = slow duration.
+                    float blackDamage = LineTrapFlatDamage * tier.DamageMultiplier * TrapEffectScale;
+                    enemy.TakeDamage(blackDamage);
+                    float slowMultiplier = tier.SpecialValue > 0f ? tier.SpecialValue : 0.6f;
+                    float slowDuration = tier.SpecialValue2 > 0f ? tier.SpecialValue2 : 2f;
+                    enemy.ApplySlow(slowMultiplier, slowDuration * TrapEffectScale);
+                    break;
+
+                case ShapeColor.White:
+                    foreach (var ally in placedShapes)
+                    {
+                        if (ally.Type == ShapeType.Line)
+                        {
+                            continue;
+                        }
+
+                        int rowDistance = Math.Abs(ally.Row - trapPosition.r);
+                        int colDistance = Math.Abs(ally.Col - trapPosition.c);
+
+                        // Adjacent = the 8 surrounding tiles (Chebyshev distance 1),
+                        // i.e. a 3x3 block centered on the trap. Allow upgraded tiers to
+                        // expand this slightly by using the trap's range multiplier.
+                        int radius = Math.Max(1, (int)Math.Round(1f * tier.RangeMultiplier));
+
+                        if (Math.Max(rowDistance, colDistance) <= radius)
+                        {
+                            // Apply the tier's damage buff multiplier/duration but scale it
+                            // down so the trap's pulse is weaker than a White tower.
+                            float buffMultiplier = tier.SpecialValue2 > 0f ? tier.SpecialValue2 : 1.2f;
+                            float buffDuration = tier.SpecialValue > 0f ? tier.SpecialValue : 5f;
+                            // Scale the extra effect down toward 1.0 baseline for multipliers
+                            // (so 1.2 -> 1.12 when TrapEffectScale=0.6) and scale duration down
+                            // linearly.
+                            float finalMultiplier = 1f + (buffMultiplier - 1f) * TrapEffectScale;
+                            ally.ApplyAttackDamageBuff(finalMultiplier, buffDuration * TrapEffectScale);
+                        }
+                    }
+                    break;
+
+                case ShapeColor.Red:
+                    // Red trap is a burn. If tiers don't supply explicit burn numbers,
+                    // scale a default burn DPS by the tier's DamageMultiplier so upgrades
+                    // meaningfully increase power.
+                    float defaultBurnDps = 12f;
+                    float burnDps = tier.SpecialValue > 0f ? tier.SpecialValue : defaultBurnDps * tier.DamageMultiplier;
+                    float burnDur = tier.SpecialValue2 > 0f ? tier.SpecialValue2 : 2f;
+                    enemy.ApplyBurn(burnDps * TrapEffectScale, burnDur * TrapEffectScale);
+                    break;
+
+                case ShapeColor.Purple:
+                    float stunDur = tier.SpecialValue > 0f ? tier.SpecialValue : 1.5f;
+                    enemy.ApplyStun(stunDur * TrapEffectScale);
+                    break;
+
+                case ShapeColor.Cyan:
+                    // Cyan trap knockback scales with tier DamageMultiplier when no
+                    // explicit special value is provided.
+                    float defaultKnock = 2.5f;
+                    float knock = tier.SpecialValue > 0f ? tier.SpecialValue : defaultKnock * tier.DamageMultiplier;
+                    enemy.ApplyKnockback(knock * TrapEffectScale);
+                    break;
+
+                case ShapeColor.Green:
+                    float poisonDPS = tier.SpecialValue > 0f ? tier.SpecialValue : 4f;
+                    float poisonDur = tier.SpecialValue2 > 0f ? tier.SpecialValue2 : 4f;
+                    enemy.ApplyPoison(poisonDPS * TrapEffectScale, poisonDur * TrapEffectScale);
+                    break;
+
+                case ShapeColor.Blue:
+                    float groundedDur = tier.SpecialValue > 0f ? tier.SpecialValue : 2.5f;
+                    enemy.ApplyGrounded(groundedDur * TrapEffectScale);
+                    break;
+
+                case ShapeColor.Yellow:
+                    float yellowDamage = LineTrapFlatDamage * 0.4f * tier.DamageMultiplier * TrapEffectScale;
+                    enemy.TakeDamage(yellowDamage);
+                    float yellowSlow = tier.SpecialValue > 0f ? tier.SpecialValue : 0.5f;
+                    float yellowSlowDur = tier.SpecialValue2 > 0f ? tier.SpecialValue2 : 1.2f;
+                    enemy.ApplySlow(yellowSlow, yellowSlowDur * TrapEffectScale);
+                    break;
+            }
+        }
+
+        public int ConsumeCashReward()
+        {
+            int amount = pendingCashReward;
+            pendingCashReward = 0;
+            return amount;
+        }
+
+        private int GetKillReward(Enemy enemy)
+        {
+            return Math.Max(3, (int)(enemy.MaxHealth / 5f));
+        }
+
+        private int GetWaveClearReward()
+        {
+            return 25 + CurrentWaveNumber * 4;
+        }
+    }
+}

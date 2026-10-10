@@ -1,0 +1,119 @@
+﻿using System;
+using System.Collections.Generic;
+
+namespace TDGachaGame
+{
+    public static class FloorEnemyGenerator
+    {
+        private static readonly Random rng = new Random();
+
+        public static (DifficultyTier tier, List<List<Enemy>> waves) Generate(int stageNumber)
+        {
+            DifficultyTier tier = RollDifficultyTier(stageNumber);
+            List<List<Enemy>> waves = BuildWaves(stageNumber, tier);
+
+            return (tier, waves);
+        }
+
+        private static List<List<Enemy>> BuildWaves(int stageNumber, DifficultyTier tier)
+        {
+            // 5 waves minimum, +1 every 10 stages.
+            int waveCount = 20 + stageNumber / 10;
+
+            var waves = new List<List<Enemy>>();
+            int previousCount = 0;
+
+            for (int w = 0; w < waveCount; w++)
+            {
+                int count = RollWaveEnemyCount(stageNumber, tier);
+
+                // Each wave must be bigger than the one before it.
+                if (count <= previousCount)
+                {
+                    count = previousCount + rng.Next(1, 4);
+                }
+
+                previousCount = count;
+                waves.Add(BuildEnemyList(count, stageNumber));
+            }
+
+            return waves;
+        }
+
+        private static int RollWaveEnemyCount(int stageNumber, DifficultyTier tier)
+        {
+            int baseCount = 2 + stageNumber / 3;
+
+            int tierBonus = tier switch
+            {
+                DifficultyTier.Easy => 0,
+                DifficultyTier.Normal => 2,
+                DifficultyTier.Hard => 4,
+                DifficultyTier.Extreme => 6,
+                _ => 0
+            };
+
+            int count = baseCount + tierBonus + rng.Next(-2, 5);
+            return Math.Max(1, count);
+        }
+
+        private static List<Enemy> BuildEnemyList(int count, int stageNumber)
+        {
+            var pool = new List<Enemy>();
+            var availableColors = GetAvailableColors(stageNumber);
+
+            for (int i = 0; i < count; i++)
+            {
+                EnemyColor color = availableColors[rng.Next(availableColors.Count)];
+                pool.Add(new Enemy(color));
+            }
+
+            return pool;
+        }
+
+        private static DifficultyTier RollDifficultyTier(int stageNumber)
+        {
+            double hardBias = Math.Min(stageNumber * 0.02, 0.6);
+
+            double roll = rng.NextDouble();
+
+            if (roll < 0.10 - hardBias * 0.1)
+            {
+                return DifficultyTier.Easy;
+            }
+            if (roll < 0.55 - hardBias * 0.2)
+            {
+                return DifficultyTier.Normal;
+            }
+            if (roll < 0.90 - hardBias * 0.1)
+            {
+                return DifficultyTier.Hard;
+            }
+
+            return DifficultyTier.Extreme;
+        }
+
+        private static List<EnemyColor> GetAvailableColors(int stageNumber)
+        {
+            var colors = new List<EnemyColor> { EnemyColor.Grey };
+            if (stageNumber >= 2)
+            {
+                colors.Add(EnemyColor.Yellow);
+            }
+            if (stageNumber >= 3)
+            {
+                colors.Add(EnemyColor.Aqua);
+            }
+            if (stageNumber >= 4)
+            {
+                colors.Add(EnemyColor.Green);
+            }
+            if (stageNumber >= 10)
+            {
+                colors.Add(EnemyColor.Blue);
+            }
+
+            return colors;
+        }
+    }
+}
